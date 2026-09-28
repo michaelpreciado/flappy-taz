@@ -1,219 +1,85 @@
-// Service Worker for Flappy Dog
-// Provides aggressive caching for faster loading and offline gameplay
+// Service worker for Flattenhund.
+//
+// Strategy
+//  - Precache only the small app shell (code, CSS, font, downscaled sprites).
+//  - HTML / JS / CSS / manifest: network-first, falling back to cache, so a
+//    deploy is never hidden behind a stale copy.
+//  - Images and fonts: cache-first (they are versioned by CACHE_NAME).
+//  - /api/* (leaderboard) and cross-origin requests are never touched.
 
-const CACHE_NAME = 'flappy-dog-v2.1';
-const ASSETS_TO_CACHE = [
+const CACHE_NAME = 'flattenhund-v3';
+const APP_SHELL = [
   '/',
   '/index.html',
   '/style.css',
   '/css/dark-mode.css',
+  '/css/preciado-glass.css',
   '/manifest.json',
-  
-  // Critical game assets
+  '/assets/images/icon.svg',
   '/assets/images/taz.png',
   '/assets/images/chloe.png',
-  '/assets/images/background.png',
-  '/assets/images/ground.png',
-  '/assets/images/pipe-top.png',
-  '/assets/images/pipe-bottom.png',
+  '/assets/images/mario.png',
   '/assets/fonts/PressStart2P-Regular.woff2',
-  
-  // Critical JavaScript files
-  '/js/game.js',
-  '/js/drawing-functions.js',
   '/js/local-db.js',
-  
-  // Secondary assets (loaded after critical)
   '/js/sounds.js',
   '/js/8bit-music.js',
+  '/js/drawing-functions.js',
+  '/js/mobile-optimization.js',
+  '/js/game.js',
   '/js/dark-mode.js',
   '/js/leaderboard.js',
   '/js/background-effects.js',
-  '/js/mobile-optimization.js'
+  '/js/fx.js'
 ];
 
-// Install event - cache assets
 self.addEventListener('install', (event) => {
-  console.log('[SW] Installing service worker and caching assets');
-  
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('[SW] Caching assets for faster loading');
-        return cache.addAll(ASSETS_TO_CACHE);
-      })
-      .then(() => {
-        console.log('[SW] All assets cached successfully');
-        // Force the waiting service worker to become the active service worker
-        self.skipWaiting();
-      })
-      .catch((error) => {
-        console.warn('[SW] Failed to cache some assets:', error);
-      })
+      // Individual adds so one missing file cannot abort the whole precache
+      .then((cache) => Promise.all(APP_SHELL.map((u) => cache.add(u).catch(() => {}))))
+      .then(() => self.skipWaiting())
   );
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
-  console.log('[SW] Service worker activated');
-  
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('[SW] Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    }).then(() => {
-      // Take control of all pages immediately
-      self.clients.claim();
-    })
+    caches.keys()
+      .then((names) => Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))))
+      .then(() => self.clients.claim())
   );
 });
 
-// Fetch event - serve from cache with network fallback
-self.addEventListener('fetch', (event) => {
-  // Skip non-GET requests
-  if (event.request.method !== 'GET') {
-    return;
+function put(request, response) {
+  if (response && response.ok) {
+    const copy = response.clone();
+    caches.open(CACHE_NAME).then((c) => c.put(request, copy)).catch(() => {});
   }
-  
-  // Skip external requests and the leaderboard API (always live, never cached)
-  const url = new URL(event.request.url);
-  if (url.origin !== location.origin || url.pathname.startsWith('/api/')) {
-    return;
-  }
-  
-  event.respondWith(
-    caches.match(event.request)
-      .then((cachedResponse) => {
-        // Return cached version if available
-        if (cachedResponse) {
-          // Serve from cache immediately
-          console.log('[SW] Serving from cache:', event.request.url);
-          
-          // Update cache in background for next time
-          fetch(event.request)
-            .then((response) => {
-              if (response.ok) {
-                const responseClone = response.clone();
-                caches.open(CACHE_NAME)
-                  .then((cache) => {
-                    cache.put(event.request, responseClone);
-                  });
-              }
-            })
-            .catch(() => {
-              // Network failed, but we have cache - no problem
-            });
-          
-          return cachedResponse;
-        }
-        
-        // Not in cache, fetch from network
-        return fetch(event.request)
-          .then((response) => {
-            // Don't cache non-successful responses
-            if (!response.ok) {
-              return response;
-            }
-            
-            // Clone the response
-            const responseClone = response.clone();
-            
-            // Add to cache for next time
-            caches.open(CACHE_NAME)
-              .then((cache) => {
-                cache.put(event.request, responseClone);
-              });
-            
-            return response;
-          })
-          .catch((error) => {
-            console.warn('[SW] Network request failed:', event.request.url, error);
-            
-            // For HTML requests, return a basic offline page
-            if (event.request.headers.get('accept').includes('text/html')) {
-              return new Response(`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                  <title>FLAPPY DOG - Offline</title>
-                  <style>
-                    body { 
-                      font-family: monospace; 
-                      text-align: center; 
-                      padding: 50px;
-                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                      color: white;
-                    }
-                    h1 { font-size: 3rem; margin-bottom: 1rem; }
-                    p { font-size: 1.2rem; opacity: 0.8; }
-                  </style>
-                </head>
-                <body>
-                                      <h1>FLAPPY DOG</h1>
-                  <p>You're offline, but the game should still work!</p>
-                  <p>Check your internet connection and refresh to sync your scores.</p>
-                  <button onclick="location.reload()" style="
-                    padding: 10px 20px; 
-                    font-size: 1rem; 
-                    background: #4facfe; 
-                    border: none; 
-                    border-radius: 5px; 
-                    color: white; 
-                    cursor: pointer;
-                    margin-top: 20px;
-                  ">Retry</button>
-                </body>
-                </html>
-              `, {
-                headers: { 'Content-Type': 'text/html' }
-              });
-            }
-            
-            throw error;
-          });
-      })
-  );
-});
+  return response;
+}
 
-// Handle messages from the main thread
-self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
-    self.skipWaiting();
-  }
-});
-
-// Preload critical assets when service worker starts
 self.addEventListener('fetch', (event) => {
-  // Preload critical game assets on first visit
-  if (event.request.url.includes('/index.html') || event.request.url === location.origin + '/') {
-    event.waitUntil(
-      caches.open(CACHE_NAME).then((cache) => {
-        // Preload most critical assets
-        const criticalAssets = [
-          '/assets/images/taz.png',
-          '/assets/images/chloe.png',
-          '/js/game.js',
-          '/js/drawing-functions.js'
-        ];
-        
-        return Promise.all(
-          criticalAssets.map((asset) => 
-            fetch(asset).then((response) => {
-              if (response.ok) {
-                cache.put(asset, response.clone());
-              }
-            }).catch(() => {
-              // Ignore preload failures
-            })
-          )
-        );
-      })
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
+  if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
+
+  const isCode = req.mode === 'navigate' || /\.(?:html|js|css|json)$/.test(url.pathname) || url.pathname === '/';
+
+  if (isCode) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => put(req, res))
+        .catch(() => caches.match(req).then((hit) => hit || caches.match('/index.html')))
     );
+    return;
   }
-}); 
+
+  event.respondWith(
+    caches.match(req).then((hit) => hit || fetch(req).then((res) => put(req, res)))
+  );
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
