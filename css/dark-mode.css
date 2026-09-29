@@ -112,22 +112,6 @@ body.dark-mode .moon-icon {
     display: none;
 }
 
-/* Stars in night sky (dark mode only) */
-.stars {
-    display: none;
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    z-index: 1;
-}
-
-body.dark-mode .stars {
-    display: block;
-}
-
 /* Apply theme variables to existing elements */
 body {
     background-color: var(--sky-color);

@@ -1,19 +1,43 @@
 {
-  "name": "flattenhund",
-  "short_name": "flattenhund",
-  "description": "8-bit style flappy bird game with challenging physics and leaderboards",
-  "start_url": "./index.html",
-  "display": "fullscreen",
-  "orientation": "portrait-primary",
+  "id": "/flattenhund",
+  "name": "Flattenhund",
+  "short_name": "Flattenhund",
+  "description": "Retro pixel-art flappy game with a matrix-blue glass UI, chiptune sound and a live leaderboard.",
+  "start_url": "./?source=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "orientation": "any",
   "theme_color": "#04060a",
   "background_color": "#04060a",
+  "lang": "en",
+  "dir": "ltr",
   "categories": [
     "games",
     "entertainment"
   ],
-  "lang": "en",
-  "dir": "ltr",
   "icons": [
+    {
+      "src": "assets/images/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/images/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/images/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
     {
       "src": "assets/images/icon.svg",
       "sizes": "any",
@@ -24,42 +48,30 @@
   "screenshots": [
     {
       "src": "assets/images/screenshot-mobile.png",
-      "sizes": "640x1136",
+      "sizes": "390x844",
       "type": "image/png",
-      "platform": "narrow"
+      "form_factor": "narrow",
+      "label": "Menu"
     },
     {
       "src": "assets/images/screenshot-desktop.png",
       "sizes": "1280x720",
       "type": "image/png",
-      "platform": "wide"
+      "form_factor": "wide",
+      "label": "Gameplay"
     }
-  ],
-  "prefer_related_applications": false,
-  "edge_side_panel": {
-    "preferred_width": 400
-  },
-  "scope": "./",
-  "id": "flattenhund-game",
-  "launch_handler": {
-    "client_mode": "focus-existing"
-  },
-  "handle_links": "preferred",
-  "display_override": [
-    "fullscreen",
-    "standalone",
-    "minimal-ui"
   ],
   "shortcuts": [
     {
-      "name": "Play Game",
+      "name": "Play",
       "short_name": "Play",
-      "description": "Start playing flattenhund",
-      "url": "./index.html",
+      "description": "Start playing Flattenhund",
+      "url": "./?source=shortcut",
       "icons": [
         {
           "src": "assets/images/icon-192.png",
-          "sizes": "192x192"
+          "sizes": "192x192",
+          "type": "image/png"
         }
       ]
     }
