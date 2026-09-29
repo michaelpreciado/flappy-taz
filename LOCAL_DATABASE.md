@@ -1,50 +1,41 @@
-# SQLite Database
+# Leaderboard storage
 
-The game's leaderboard and game-session tracking are backed by SQLite with
-**zero external services and zero npm dependencies** (it uses Node's built-in
-`node:sqlite` module).
-
-## Quick start
+The leaderboard needs **no external services and no npm packages**.
 
 ```bash
-npm start          # or: node server/server.js
+npm start          # serves the game and the API on http://localhost:8000
 ```
 
-Then open http://localhost:8000 — the server hosts both the game and the database API.
+## Storage backends
 
-Requires **Node.js 22.5+** (for the built-in `node:sqlite` module).
+`server/store.js` picks the backend at startup:
 
-## Architecture
+| Backend | When | File |
+| --- | --- | --- |
+| SQLite (`node:sqlite`) | Node 22.5+ (before 22.13 it needs `--experimental-sqlite`) | `data/flattenhund.db` |
+| JSON file | Anything else, or `FLATTENHUND_STORE=json` | `data/flattenhund.json` (written atomically) |
 
-| Piece | Role |
-|---|---|
-| [server/server.js](server/server.js) | Serves the static game files and the JSON API |
-| [server/schema.sql](server/schema.sql) | SQLite schema, applied automatically on startup |
-| [js/local-db.js](js/local-db.js) | Browser client exposing `window.gameDB` |
+`npm start` used to crash on Node without `node:sqlite` (`ERR_UNKNOWN_BUILTIN_MODULE`); it now logs a one-line notice and uses the JSON store instead. The schema lives in [server/schema.sql](server/schema.sql) and is applied on startup. A new database is seeded with `DEV` (100) and `TEST` (50). `data/` is gitignored; delete it to reset the board.
 
-`js/local-db.js` exposes the `window.gameDB` interface (`getLeaderboard`,
-`saveScore`, `createGameSession`, `updateGameSession`, `isAvailable`, `init`)
-consumed by `game.js` and `leaderboard.js`. The "keep only each player's
-highest score" duplicate prevention runs server-side.
+Environment: `PORT` (default 8000), `HOST` (default 0.0.0.0), `DATA_DIR` (default `./data`).
 
-## API endpoints
+## API
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | Availability check (used by the client on load) |
-| GET | `/api/leaderboard?limit=10` | Top scores, ordered by score descending |
-| POST | `/api/scores` | Save `{ name, score, character }`; updates only if higher |
-| POST | `/api/sessions` | Create a game session `{ character, isNightMode }` |
-| PATCH | `/api/sessions/:id` | End a session with `{ score, boostUsedCount }` |
+| Method | Path | Body | Result |
+| --- | --- | --- | --- |
+| GET | `/api/health` | | `{ ok, backend }` |
+| GET | `/api/leaderboard?limit=10` | | `[{ name, score }]`, best first (limit 1-100) |
+| POST | `/api/scores` | `{ name, score, character }` | `201` new player, `200` existing; only replaces a lower score |
+| POST | `/api/sessions` | `{ character, isNightMode }` | session row |
+| PATCH | `/api/sessions/:id` | `{ score, boostUsedCount }` | `{ updated: true }` or `404` |
 
-## Database file
+Validation: names are trimmed, stripped of control characters and cut to 10 characters; scores must be integers from 0 to 100000; bodies are capped at 10 KB; writes are limited to 40 per minute per IP (`429`). Only `index.html`, `style.css`, `manifest.json`, `sw.js`, `assets/`, `css/` and `js/` are served, so the database, server code and `package.json` are not downloadable.
 
-The database is created automatically at `data/flattenhund.db` on first run
-and seeded with two sample rows (`DEV`/100, `TEST`/50). It is gitignored. To
-reset the leaderboard, stop the server and delete the `data/` directory.
+## Client behaviour (`js/local-db.js`)
 
-## Static hosting
+`window.gameDB` exposes `getLeaderboard`, `saveScore`, `createGameSession`, `updateGameSession`, `isAvailable`, `isOnline`, `mode` and `init`.
 
-When the game is served without the API (e.g. Vercel/Netlify static hosting,
-or `npm run start:static`), the client's health check fails and leaderboard
-features disable themselves gracefully — gameplay is unaffected.
+- On load it pings `/api/health` with a 2.5 s timeout. Success means `mode === 'online'`.
+- If the server is unreachable (static hosting, server stopped, network drop) it switches to `mode === 'local'`: the board is kept in `localStorage` (top 50) and every save is also queued (last 20).
+- While local it re-checks the server at most every 15 s. When it answers, the queue is flushed and the board goes back online.
+- The UI labels the board `ONLINE LEADERBOARD` or `LOCAL LEADERBOARD` accordingly.

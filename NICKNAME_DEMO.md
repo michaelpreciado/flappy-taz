@@ -3,7 +3,7 @@
 ## ✨ **How It Works Now**
 
 ### 🆕 **First-Time Players**
-1. **Play the game** and achieve a score that qualifies for the leaderboard
+1. **Play the game** and beat your personal best with at least 5 points (and a score that makes the top 10)
 2. **Enter your nickname** when prompted (max 10 characters)
 3. **Your nickname is saved** and remembered for all future games
 4. **Your highest score is submitted** to the leaderboard
