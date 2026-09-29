@@ -1,1286 +1,911 @@
-// Main game file for Flappy Mario
-// This file handles the game initialization, loop, and core mechanics
+// Flattenhund core: fixed-timestep simulation, render loop, input, game flow.
+//
+// Loop design
+//  - One requestAnimationFrame loop for menu, play and game over.
+//  - Physics runs on a fixed 120 Hz step fed by an accumulator, so a 60, 120 or
+//    144 Hz display all play identically. Rendering interpolates between the
+//    last two steps, so motion stays smooth even when the display rate is not a
+//    multiple of the step (e.g. 144 Hz).
+//  - Menu / game-over screens render at ~30 fps (the scene is slow and sits
+//    behind blurred glass); full rate whenever something is animating.
+//  - All sprites, scenery, gradients and glow are cached offscreen; particles
+//    and floaters live in fixed pools, so a frame allocates nothing.
+//
+// All gameplay geometry is in CSS pixels; the canvas transform maps to device
+// pixels (DPR capped at 2).
 
-// Game constants: all speed/acceleration values are in units per second (pixels/sec or pixels/sec^2)
-// Target FPS for conversion baseline was 60 FPS.
+// ---------------------------------------------------------------------------
+// Tunables (per-second units; values are the original 60 fps frame values x60)
+// ---------------------------------------------------------------------------
 
-const GRAVITY_ACCEL = 0.25 * 60 * 60; // Reduced gravity for more floaty feel (900 px/sec^2)
-const FLAP_VELOCITY_SET = -5.5 * 60; // Slightly reduced flap strength (-330 px/sec)
-const PIPE_SPEED_PPS = 3.1 * 60;     // (3.1 px/frame * 60 frames/sec) = 186 px/sec (was 2.7)
-const FORWARD_LEAP_VEL_CHANGE_PPS = 0.6 * 60; // Reduced forward impulse for smoother movement (36 px/sec)
-const MAX_FORWARD_SPEED_PPS = 2.0 * 60;   // Reduced max speed for better control (120 px/sec)
-const FORWARD_DRAG_FACTOR = 0.97;    // Less drag for smoother horizontal movement
+const STEP = 1 / 120;                        // fixed simulation step (s)
+const MAX_STEPS_PER_FRAME = 10;              // spiral-of-death guard
+const MAX_FRAME_DELTA_SECONDS = 0.1;         // clamp after tab switches / hitches
 
-const FLOAT_DURATION_SECONDS = 18 / 60; // Slightly longer float duration (0.3 seconds)
-const FLOAT_GRAVITY_MULTIPLIER = 0.6; // Even less gravity during float for better control
+const GRAVITY_ACCEL = 0.25 * 60 * 60;        // 900 px/s^2
+const FLAP_VELOCITY_SET = -5.5 * 60;         // -330 px/s
+const PIPE_SPEED_PPS = 3.1 * 60;             // 186 px/s
+const FORWARD_LEAP_VEL_CHANGE_PPS = 0.6 * 60;
+const MAX_FORWARD_SPEED_PPS = 2.0 * 60;
+const FORWARD_DRAG_FACTOR = 0.97;            // per 1/60 s
+const FLOAT_DURATION_SECONDS = 18 / 60;
+const FLOAT_GRAVITY_MULTIPLIER = 0.6;
 
-const PARTICLE_MIN_SPEED_X_PPS = -3 * 60; // -180 px/sec
-const PARTICLE_MAX_SPEED_X_PPS = -1 * 60; // -60 px/sec
-const PARTICLE_MIN_SPEED_Y_PPS = -1 * 60; // -60 px/sec
-const PARTICLE_MAX_SPEED_Y_PPS = 1 * 60;  // 60 px/sec
-const PARTICLE_LIFE_DECAY_PER_SEC = 0.05 * 60; // 3.0 units of life per second (assuming life is 1.0 initially)
+const PIPE_SPAWN_INTERVAL = 2.0;             // seconds
+const PIPE_GAP = 170;
+const PIPE_WIDTH = 90;
+const GROUND_HEIGHT = 120;
+const DOG_SIZE = 48;
+const HITBOX_INSET = 5;                      // forgiving hitbox: 5 px shaved off each side of the sprite
+const PERFECT_WINDOW = 30;                   // px from gap centre = "perfect" pass (cosmetic combo only)
+const MAX_PIPE_CENTRE_DELTA = 260;           // successive gaps never swing further apart than this
 
-const MARIO_ANIM_FPS = 0.2 * 60; // (0.2 anim_frames/game_frame * 60 game_frames/sec) = 12 animation frames/sec
+const PARTICLE_POOL = 180;
+const FLOATER_POOL = 8;
+const TRAIL_LEN = 20;                        // recorded sim steps (~167 ms)
 
-// Game constants continue
-const PIPE_SPAWN_INTERVAL = 2000; // Time between pipes (milliseconds) - (was 2200)
-const PIPE_GAP = 170; // Reduced gap for harder gameplay (was 190)
-const GROUND_HEIGHT = 120; // Taller ground section like in Flappy Bird
-const MARIO_WIDTH = 48; // Increased character size
-const MARIO_HEIGHT = 48; // Increased character size
-const MAX_FRAME_DELTA_SECONDS = 1 / 15; // Clamp for stability after tab pauses
+const CYAN = '#5CE1F2';
+const SMOKE_COLORS = ['#FFFFFF', '#CFF7FC', CYAN];
+const BURST_COLORS = ['#FFFFFF', CYAN, '#6AA6FF'];
+const DEATH_COLORS = ['#FFFFFF', CYAN, '#6AA6FF', '#FF5A6A'];
 
-// Game variables
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
 let canvas, ctx;
-let mario = {
-    x: 80,
-    y: 300,
-    width: MARIO_WIDTH,
-    height: MARIO_HEIGHT,
-    velocity: 0,      // Vertical velocity
-    velocityX: 0,     // Horizontal velocity for smooth movement
-    isFlapping: false,
-    frameCount: 0,    // For animation frames
-    animationFrameCount: 0, // Accumulator for animation frames
-    floatTimer: 0,    // Timer for floating effect (in seconds)
-    smoothRotation: 0, // Smoothly interpolated rotation value
-    targetRotation: 0, // Target rotation for smoother interpolation
-    holdTimer: 0,     // Timer for tracking how long input is held
-    bobOffset: 0,     // For idle bobbing animation
-    scaleX: 1,        // For sprite direction/animation effects
-    scaleY: 1         // For subtle animation effects
-};
-
-// Game session tracking (SQLite backend)
-let currentSession = null;
-
-// Particle system for smoke trail
-let particles = [];
-let floaters = [];      // rising "+1" score pops
-let trail = [];         // recent character positions for the glow trail
-let glowSprite = null;  // pre-rendered radial glow, drawn additively
-
-let pipes = [];
+let currentDpr = 1;
 let ground = { y: 0 };
+let pipes = [];
 let score = 0;
 let highScore = 0;
-let gameStarted = false;
-let gameOver = false;
-let animationFrameId;
-let lastTime = 0;
-let pipeSpawnTimer = 0;
-let currentDpr = 1;
-let qualityLevel = 'high';
-let frameTimeSampleMs = [];
-const FRAME_SAMPLE_SIZE = 60;
-let isPointerDown = false;
+let combo = 0;
+let bestCombo = 0;
+let isDarkMode = false;
+let selectedCharacter = null;      // 'taz' | 'chloe'
+let currentSession = null;
 
-// 8-bit theme colors
-const COLORS_8BIT = {
-    sky: '#4EC0CA',
-    ground: '#8CC453',
-    dirt: '#DED895',
-    pipe: '#74BF2E',
-    pipeBorder: '#558022',
-    scoreText: '#FFFFFF',
-    scoreBox: '#000000'
+let gameStarted = false;           // true from the first tap until reset
+let gameOver = false;
+let paused = false;
+
+let rafId = 0;
+let lastFrameTs = 0;
+let lastRenderTs = 0;
+let accumulator = 0;
+let pipeTimer = 0;
+let deadTime = 0;
+let qualityLevel = 'high';
+const frameSamples = new Float32Array(60);
+let frameSampleIdx = 0;
+let frameSampleFill = 0;
+let lastPipeCentre = -1;
+
+const dog = {
+    x: 80, y: 300, px: 80, py: 300,
+    width: DOG_SIZE, height: DOG_SIZE,
+    velocity: 0, velocityX: 0,
+    floatTimer: 0, flapPulse: false,
+    rotation: 0, prevRotation: 0,
+    scaleX: 1, scaleY: 1,
+    bob: 0, spin: 0
 };
 
+// Trail: ring buffer of recent positions (x, y pairs)
+const trail = new Float32Array(TRAIL_LEN * 2);
+let trailCount = 0;
+let trailHead = 0;
+
+// Pools (no allocation during play)
+const particles = [];
+for (let i = 0; i < PARTICLE_POOL; i++) {
+    particles.push({ on: false, x: 0, y: 0, vx: 0, vy: 0, g: 0, size: 4, life: 0, decay: 1, color: '#fff' });
+}
+let particleCursor = 0;
+const floaters = [];
+for (let i = 0; i < FLOATER_POOL; i++) {
+    floaters.push({ on: false, x: 0, y: 0, text: '', life: 0, big: false });
+}
+let floaterCursor = 0;
+
 // Assets
-let marioSprite = new Image();
-let tazSprite = new Image();
-let chloeSprite = new Image();
-let selectedCharacter = null; // 'taz' or 'chloe'
-let pipeTopSprite = new Image();
-let pipeBottomSprite = new Image();
-let backgroundSprite = new Image();
-let groundSprite = new Image();
+const sprites = { taz: new Image(), chloe: new Image() };
+const spriteCache = { taz: null, chloe: null, dpr: 0 };
+let glowSprite = null;
+let glowDpr = 0;
 
-// Sound contexts
-let flapSoundContext;
-let scoreSoundContext;
-let hitSoundContext;
-let gameOverSoundContext;
-
-// DOM elements
+// DOM
 let startScreen, gameOverScreen, scoreDisplay, finalScoreDisplay, highScoreDisplay;
-let newHighScoreSplash, splashScoreElement; // Add splash screen elements
-// Game DOM elements
+let newHighScoreSplash, splashScoreElement, comboEl, pauseEl, restartBtn;
+let splashTimer = 0, finishTimer = 0;
 
-// Dark mode support
-let isDarkMode = false;
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
 
-// Initialize the game
+const reducedMotion = () => !!(window.fx && window.fx.reducedMotion());
+const sfx = (name, arg) => { if (window.gameAudio) window.gameAudio.play(name, arg); };
+// Frame-rate independent exponential smoothing: equivalent to `v += (t - v) * k`
+// once per 1/60 s frame, applied over dt.
+const smoothing = (k60, dt) => 1 - Math.pow(1 - k60, 60 * dt);
+
+function isPlaying() { return gameStarted && !gameOver && !paused; }
+
+// ---------------------------------------------------------------------------
+// Init / resize
+// ---------------------------------------------------------------------------
+
 function init() {
-    // Get DOM elements
     canvas = document.getElementById('game-canvas');
-    ctx = canvas.getContext('2d');
+    ctx = canvas.getContext('2d', { alpha: false });
     startScreen = document.getElementById('start-screen');
     gameOverScreen = document.getElementById('game-over');
     scoreDisplay = document.getElementById('score');
     finalScoreDisplay = document.getElementById('final-score');
     highScoreDisplay = document.getElementById('high-score');
-    
-    // Get splash screen elements
     newHighScoreSplash = document.getElementById('new-high-score-splash');
     splashScoreElement = document.getElementById('splash-score');
-    
-    // Game initialization
-    
-    // Set initial canvas dimensions and add resize listener
-    resizeCanvas(); // Initial size
-    window.addEventListener('resize', resizeCanvas, { passive: true });
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    comboEl = document.getElementById('combo');
+    pauseEl = document.getElementById('pause-overlay');
+    restartBtn = document.getElementById('restart-button');
 
-    // For crisp pixel art rendering (will be set in resizeCanvas too)
-    // ctx.imageSmoothingEnabled = false; // Moved to resizeCanvas
-    
-    // Initialize 8-bit audio system with reduced music
-    if (window.eightBitAudio) {
-        window.eightBitAudio.init();
-        // Disable background music by default
-        window.eightBitAudio.enableMusic(false);
-    }
-    
-    // Ground position is set by resizeCanvas() in CSS pixels; recomputing it
-    // here from canvas.height (device pixels) pushed the ground off-screen
-    // on high-DPR displays.
-    
-    // Load high score from new persistent player data system
-    // This will be updated by the leaderboard system when it loads
-    // For now, just set to 0 and let leaderboard.js handle it
-    highScore = 0;
-    highScoreDisplay.textContent = highScore;
-    
-    // Load assets
-    loadAssets();
-
-    // Character selection logic
-    const chooseTazBtn = document.getElementById('choose-taz');
-    const chooseChloeBtn = document.getElementById('choose-chloe');
-    const startBtn = document.getElementById('start-button');
-    
-    // Debug: Log if elements are found
-    console.log('🎮 Character selection setup:', {
-        chooseTazBtn: !!chooseTazBtn,
-        chooseChloeBtn: !!chooseChloeBtn, 
-        startBtn: !!startBtn
-    });
-    
-    // Helper function to add both click and touch events for mobile compatibility
-    function addButtonListener(element, handler) {
-        if (!element) {
-            console.error('❌ Cannot add listener to null element');
-            return;
-        }
-        element.addEventListener('pointerup', (e) => {
-            e.preventDefault();
-            handler();
-        });
-    }
-    
-    addButtonListener(chooseTazBtn, () => {
-        console.log('🐾 Taz selected');
-        selectedCharacter = 'taz';
-        chooseTazBtn.classList.add('selected');
-        chooseChloeBtn.classList.remove('selected');
-    });
-    
-    addButtonListener(chooseChloeBtn, () => {
-        console.log('🐕 Chloe selected');
-        selectedCharacter = 'chloe';
-        chooseChloeBtn.classList.add('selected');
-        chooseTazBtn.classList.remove('selected');
-    });
-
-    // Auto-select Taz by default
-    if (!selectedCharacter && chooseTazBtn) {
-        console.log('🔧 Auto-selecting Taz as default character');
-        selectedCharacter = 'taz';
-        chooseTazBtn.classList.add('selected');
-    }
-
-    // Event listeners - add both click and touch support for mobile
-    addButtonListener(document.getElementById('start-button'), () => {
-        console.log('🚀 Start button clicked, selectedCharacter:', selectedCharacter);
-        // Auto-select Taz if no character selected
-        if (!selectedCharacter) {
-            console.log('🔧 Auto-selecting Taz since no character was chosen');
-            selectedCharacter = 'taz';
-        }
-        startGame();
-    });
-    addButtonListener(document.getElementById('restart-button'), resetGame);
-    
-    // Input handlers
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    canvas.addEventListener('pointerdown', handlePointerDown, { passive: false });
-    canvas.addEventListener('pointerup', handlePointerUp, { passive: false });
-    canvas.addEventListener('pointercancel', handlePointerUp, { passive: false });
-    
-    // Initial render
-    render();
-    
-    // Check if dark mode is enabled
     isDarkMode = document.body.classList.contains('dark-mode');
-    
-    // Expose theme update function for dark-mode.js
-    window.updateGameTheme = function(darkModeEnabled) {
+    highScoreDisplay.textContent = highScore;
+
+    sprites.taz.src = 'assets/images/taz.png';
+    sprites.chloe.src = 'assets/images/chloe.png';
+
+    resizeCanvas();
+    window.addEventListener('resize', scheduleResize, { passive: true });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', scheduleResize, { passive: true });
+    watchDpr();
+    document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
+    window.addEventListener('blur', pauseGame);
+
+    setupMenu();
+
+    canvas.addEventListener('pointerdown', handlePointerDown, { passive: false });
+    window.addEventListener('keydown', handleKeyDown);
+    if (pauseEl) pauseEl.addEventListener('pointerdown', (e) => { e.preventDefault(); resumeGame(); });
+
+    window.updateGameTheme = function (darkModeEnabled) {
         isDarkMode = darkModeEnabled;
-        // The game loop only runs during play; repaint immediately so the
-        // menu/game-over background switches theme too
-        if (!gameStarted || gameOver) {
-            render();
+        invalidateScenery();
+        if (!isPlaying()) drawFrame(1, 0, performance.now());
+    };
+    window.setGameHighScore = function (n) {
+        if (Number.isFinite(n) && n > highScore) {
+            highScore = n;
+            highScoreDisplay.textContent = highScore;
         }
     };
-    
-    // Initialize leaderboard system
-    if (window.initializeLeaderboardSystem) {
-        window.initializeLeaderboardSystem().catch(error => {
-            console.warn('⚠️ Leaderboard initialization failed:', error);
-        });
-    }
 
-    // Ambient background animation for the menu and game-over screens.
-    // The main gameLoop renders during play; this keeps clouds drifting and
-    // stars twinkling the rest of the time (cheap guard when playing).
-    // Throttled to ~30fps on menus (the scene is slow-moving and sits behind
-    // blurred glass); runs at full rate while death FX are still animating.
-    let ambientLast = 0;
-    requestAnimationFrame(function ambientLoop(now) {
-        requestAnimationFrame(ambientLoop);
-        if (gameStarted && !gameOver) return;
-        const fxActive = gameOver && (particles.length > 0 || floaters.length > 0);
-        if (!fxActive && now - ambientLast < 33) return;
-        const dt = Math.min(MAX_FRAME_DELTA_SECONDS, (now - (ambientLast || now)) / 1000);
-        ambientLast = now;
-        if (fxActive) {
-            updateParticles(dt);
-            updateFloaters(dt);
-        }
-        render();
-    });
+    if (window.initializeLeaderboardSystem) window.initializeLeaderboardSystem();
+
+    lastFrameTs = performance.now();
+    rafId = requestAnimationFrame(frame);
 }
 
-// Function to handle canvas resizing
+function setupMenu() {
+    const tazBtn = document.getElementById('choose-taz');
+    const chloeBtn = document.getElementById('choose-chloe');
+    const startBtn = document.getElementById('start-button');
+
+    function choose(name) {
+        selectedCharacter = name;
+        tazBtn.classList.toggle('selected', name === 'taz');
+        chloeBtn.classList.toggle('selected', name === 'chloe');
+        tazBtn.setAttribute('aria-pressed', String(name === 'taz'));
+        chloeBtn.setAttribute('aria-pressed', String(name === 'chloe'));
+        sfx('click');
+    }
+    tazBtn.addEventListener('click', () => choose('taz'));
+    chloeBtn.addEventListener('click', () => choose('chloe'));
+    choose('taz');
+
+    startBtn.addEventListener('click', startGame);
+    restartBtn.addEventListener('click', resetGame);
+}
+
+let resizeQueued = false;
+function scheduleResize() {
+    if (resizeQueued) return;
+    resizeQueued = true;
+    requestAnimationFrame(() => { resizeQueued = false; resizeCanvas(); });
+}
+
+// Re-fit when the DPR changes (dragging between monitors, browser zoom)
+function watchDpr() {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+    const onChange = () => { resizeCanvas(); watchDpr(); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange, { once: true });
+}
+
 function resizeCanvas() {
-    if (!canvas || !ctx) return;
+    if (!canvas) return;
+    const host = canvas.parentElement;
+    const cssW = host.clientWidth || window.innerWidth;
+    const cssH = host.clientHeight || window.innerHeight;
     currentDpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cssWidth = window.innerWidth;
-    const cssHeight = window.innerHeight;
-    canvas.style.width = `${cssWidth}px`;
-    canvas.style.height = `${cssHeight}px`;
-    canvas.width = Math.floor(cssWidth * currentDpr);
-    canvas.height = Math.floor(cssHeight * currentDpr);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.floor(cssW * currentDpr);
+    canvas.height = Math.floor(cssH * currentDpr);
     ctx.setTransform(currentDpr, 0, 0, currentDpr, 0, 0);
-    
-    // Update ground position
-    ground.y = cssHeight - GROUND_HEIGHT;
-    
-    // Ensure crisp pixel art rendering after resize
     ctx.imageSmoothingEnabled = false;
 
-    // If the game is over or not started, the main gameLoop isn't running render(),
-    // so we might need to manually call render() here to update the static background elements.
-    // However, if the game IS running, gameLoop will handle rendering.
-    // For simplicity and to avoid potential double rendering issues if gameLoop is active,
-    // we can just let the gameLoop handle it if active, or if not, just update static elements.
-    // A simple render() call here should be okay as it redraws the current state.
-    if (!gameStarted || gameOver) { 
-        render(); // Redraw static elements or game over screen
-    } 
-    // If game is active, gameLoop will pick up the new dimensions in its next frame.
+    ground.y = cssH - GROUND_HEIGHT;
+    for (let i = 0; i < pipes.length; i++) pipes[i].bottom.height = Math.max(0, cssH - pipes[i].bottom.y);
+    ambient.resize(cssW, ground.y);
+    if (gameStarted && !gameOver) dog.y = Math.min(dog.y, ground.y - dog.height);
+    if (!isPlaying()) drawFrame(1, 0, performance.now());
 }
 
-// Helper to get current character sprite
-function getCurrentCharacterSprite() {
-    if (selectedCharacter === 'taz') return tazSprite;
-    if (selectedCharacter === 'chloe') return chloeSprite;
-    return marioSprite;
+// Sprites pre-scaled once (high-quality downscale) so the per-frame blit is a 1:1 copy
+function ensureSpriteCache() {
+    if (spriteCache.dpr === currentDpr && spriteCache.taz && spriteCache.chloe) return;
+    ['taz', 'chloe'].forEach((name) => {
+        const img = sprites[name];
+        if (!img.complete || !img.naturalWidth) { spriteCache[name] = null; return; }
+        const c = document.createElement('canvas');
+        c.width = c.height = Math.round(DOG_SIZE * currentDpr);
+        const g = c.getContext('2d');
+        g.imageSmoothingEnabled = true;
+        g.imageSmoothingQuality = 'high';
+        g.drawImage(img, 0, 0, c.width, c.height);
+        spriteCache[name] = c;
+    });
+    if (spriteCache.taz && spriteCache.chloe) spriteCache.dpr = currentDpr;   // else retry next frame
 }
 
-// Helper to draw rounded rectangles (for score display)
-function roundRect(ctx, x, y, width, height, radius, fill) {
-    ctx.beginPath();
-    ctx.moveTo(x + radius, y);
-    ctx.lineTo(x + width - radius, y);
-    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-    ctx.lineTo(x + width, y + height - radius);
-    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-    ctx.lineTo(x + radius, y + height);
-    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-    ctx.lineTo(x, y + radius);
-    ctx.quadraticCurveTo(x, y, x + radius, y);
-    ctx.closePath();
-    if (fill) {
-        ctx.fill();
-    } else {
-        ctx.stroke();
-    }
-}
-
-// Render background clouds - strictly in background layer (STATIC VERSION)
-function renderBackgroundClouds() {
-    // Use a much lighter cloud color with very high transparency for subtle appearance
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    
-    // STATIC CLOUDS - fixed positions, no movement or animation
-    // These clouds are completely static and will never move or change
-    
-    // Cloud 1 (upper left corner) - fixed position
-    drawStaticPixelCloud(40, 40, 100, 50);
-    
-    // Cloud 2 (upper middle area) - fixed position
-    drawStaticPixelCloud(canvas.width/2 - 80, 60, 120, 60);
-    
-    // Cloud 3 (upper right) - fixed position
-    drawStaticPixelCloud(canvas.width - 140, 50, 100, 50);
-}
-
-// Draw the city skyline silhouette in the background
-function drawCitySilhouette(baseY) {
-    ctx.fillStyle = '#DEECF0'; // Very light color for buildings to match reference
-    
-    // Draw a series of buildings with different heights - wider buildings
-    const buildingWidths = [42, 28, 56, 35, 49, 28, 35, 42, 56, 28, 49, 42, 35];
-    // Fixed building heights to remove randomness
-    const buildingHeights = [40, 30, 50, 35, 45, 25, 38, 42, 52, 28, 48, 40, 32];
-    let xPos = 0;
-    
-    for (let i = 0; i < buildingWidths.length; i++) {
-        const width = buildingWidths[i];
-        const height = buildingHeights[i]; // Use fixed heights instead of random
-        
-        // Building
-        ctx.fillRect(xPos, baseY - height, width, height);
-        
-        // Some buildings have small "windows" - now deterministic
-        if (i % 2 === 0) { // Every other building has windows
-            ctx.fillStyle = '#D0E0E8'; // Slightly darker color for windows but still very light
-            const windowSize = 3;
-            const windowY = baseY - height + 5;
-            const windowX = xPos + width/2 - windowSize/2;
-            ctx.fillRect(windowX, windowY, windowSize, windowSize);
-            ctx.fillRect(windowX - 6, windowY + 6, windowSize, windowSize);
-            ctx.fillRect(windowX + 6, windowY + 6, windowSize, windowSize);
-            ctx.fillStyle = '#DEECF0'; // Back to building color
-        }
-        
-        xPos += width;
-        // If we reached the end of the screen, go back to beginning
-        if (xPos > canvas.width) xPos = 0;
-    }
-}
-
-// Helper to draw a single STATIC pixelated cloud (no animation)
-function drawStaticPixelCloud(x, y, width, height) {
-    // Cloud color is now set in the parent function to ensure consistency
-    
-    // Main cloud body - completely static, no movement
-    ctx.fillRect(x, y, width, height);
-    
-    // Cloud bumps on top (pixelated look) - fixed positions
-    // These bumps are in fixed positions and will never change
-    ctx.fillRect(x - 15, y + 15, 22, 22);
-    ctx.fillRect(x + width/4, y - 15, 30, 30);
-    ctx.fillRect(x + width/2, y - 8, 22, 22);
-    ctx.fillRect(x + width - 22, y + 8, 30, 30);
-}
-
-// Load game assets
-function loadAssets() {
-    // Character sprites
-    tazSprite.src = 'assets/images/taz.png';
-    chloeSprite.src = 'assets/images/chloe.png';
-    // Default (legacy) Mario sprite for fallback
-    marioSprite.src = 'assets/images/mario.png';
-    
-    // Add event listeners to process sprites when they load
-    tazSprite.onload = () => processSprite(tazSprite);
-    chloeSprite.onload = () => processSprite(chloeSprite);
-    marioSprite.onload = () => processSprite(marioSprite);
-    
-    // Environment
-    // Pipes, ground and background are drawn procedurally (drawing-functions.js);
-    // the old full-size PNGs were downloaded but never used, so they are no
-    // longer loaded.
-    // Sound functions are loaded from sounds.js
-    // No need to preload as they're generated on demand
-}
-
-// Function to remove white background from sprites
-function processSprite(img) {
-    // PERFORMANCE OPTIMIZATION: Skip expensive pixel processing
-    // Most modern browsers handle transparent PNGs well without manual processing
-    // Only do basic processing if absolutely necessary
-    
-    try {
-        // Just log that the sprite is ready - no expensive processing
-        console.log('✅ Sprite loaded and ready:', img.src.split('/').pop());
-        
-        // If you really need to remove white backgrounds, do it much more efficiently:
-        // 1. Use CSS mix-blend-mode instead of pixel manipulation
-        // 2. Or prepare the images beforehand
-        // 3. Or use a much more optimized algorithm
-        
-    } catch (error) {
-        console.warn('⚠️ Could not load sprite:', error);
-    }
-}
-
-// Start the game
-async function startGame() {
-    // PERFORMANCE OPTIMIZATION: Removed console.log statements for better performance
-    // Default to Taz if none selected (should not happen)
-    if (!selectedCharacter) selectedCharacter = 'taz';
-    
-    gameStarted = true;
-    gameOver = false;
-    startScreen.style.display = 'none';
-    gameOverScreen.style.display = 'none';
-    score = 0;
-    updateScore();
-    
-    // Game start setup
-    
-    // Create a new game session in the database if available
-    try {
-        if (window.gameDB) {
-            currentSession = await window.gameDB.createGameSession(
-                selectedCharacter,
-                isDarkMode
-            );
-        }
-    } catch (err) {
-        console.error('Error creating game session:', err);
-    }
-    
-    // Only play sound effects, no continuous background music
-    // Theme music is disabled by default
-    
-    // Reset mario position with a better head start
-    mario.y = 230; // Start even higher in the air
-    mario.velocity = -3.0 * 60; // Stronger initial upward velocity (-180 px/sec)
-    mario.velocityX = 0.5 * 60; // Small initial forward momentum (30 px/sec)
-    mario.x = 80; // Reset X position
-    mario.floatTimer = FLOAT_DURATION_SECONDS * 1.33; // Start with float timer active (a bit more than one flap's worth)
-    mario.smoothRotation = 0; // Reset rotation
-    mario.targetRotation = 0; // Reset target rotation
-    mario.animationFrameCount = 0;
-    mario.bobOffset = 0; // Reset bobbing animation
-    mario.scaleX = 1; // Reset scale
-    mario.scaleY = 1; // Reset scale
-    
-    // Clear pipes
-    pipes = [];
-    particles = [];
-    floaters = [];
-    trail = [];
-    pipeSpawnTimer = PIPE_SPAWN_INTERVAL * 0.35;
-    frameTimeSampleMs = [];
-    qualityLevel = 'high';
-    
-    // Start game loop
-    lastTime = performance.now(); // Initialize lastTime for deltaTime calculation
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-    }
-    
-    document.dispatchEvent(new CustomEvent('game:start'));
-    gameLoop();
-}
-
-// Reset the game
-function resetGame() {
-    // Reset player variables before starting
-    mario.velocity = 0;
-    mario.velocityX = 0;
-    mario.rotation = 0;
-    mario.smoothRotation = 0;
-    mario.targetRotation = 0;
-    mario.x = 80;
-    mario.floatTimer = 0;
-    mario.bobOffset = 0;
-    mario.scaleX = 1;
-    mario.scaleY = 1;
-    mario.animationFrameCount = 0;
-    mario.holdTimer = 0;
-    // Reset player properties
-    
-    // Reset canvas effects
-    canvas.style.filter = 'none';
-    canvas.style.transition = 'none';
-    
-    // Reset container effects
-    const gameContainer = document.querySelector('.game-container');
-    gameContainer.style.boxShadow = 'none';
-    
-    // Prepare game restart
-    
-    startGame();
-}
-
-// Game loop
-function gameLoop() {
-    const currentTime = performance.now();
-    const deltaTime = Math.min(MAX_FRAME_DELTA_SECONDS, (currentTime - lastTime) / 1000);
-    lastTime = currentTime;
-    trackFrameTime(deltaTime);
-
-    update(deltaTime);
-    render();
-    
-    if (!gameOver) {
-        animationFrameId = requestAnimationFrame(gameLoop);
-    }
-}
-
-// Make mario flap with floatier physics and smooth forward movement
-function flap() {
-    // Add slight anticipation animation before flap
-    mario.scaleY = 0.9; // Brief squash for anticipation
-    mario.scaleX = 1.05; // Slight stretch
-    
-    // Set vertical velocity and activate float timer
-    mario.velocity = FLAP_VELOCITY_SET;
-    mario.isFlapping = true;
-    mario.floatTimer = FLOAT_DURATION_SECONDS; // Set float timer (in seconds)
-    
-    // Add forward velocity impulse (reduced for smoother movement)
-    mario.velocityX += FORWARD_LEAP_VEL_CHANGE_PPS;
-    
-    // Cap maximum forward speed
-    if (mario.velocityX > MAX_FORWARD_SPEED_PPS) {
-        mario.velocityX = MAX_FORWARD_SPEED_PPS;
-    }
-    if (mario.velocityX < -MAX_FORWARD_SPEED_PPS) { // Cap negative speed too if character can move backward
-        mario.velocityX = -MAX_FORWARD_SPEED_PPS;
-    }
-
-    // Add immediate visual feedback - rotation anticipation
-    mario.targetRotation = -0.2; // Brief upward tilt for better feedback
-    
-    // Reset animation counters for responsive feel
-    mario.animationFrameCount = 0;
-    
-    // Create smoke particles immediately upon flapping
-    // The createSmokeTrail() call was already in update() based on mario.isFlapping, that's fine.
-    
-    // Reset flap count (if mario.flapCount is used elsewhere, seems it's not fully implemented yet)
-    // setTimeout(() => {
-    //     mario.flapCount = 0; 
-    // }, 500);
-    
-    // Use 8-bit audio if available
-    if (window.eightBitAudio) {
-        window.eightBitAudio.playJumpSound();
-    } else {
-        flapSoundContext = window.gameSounds.flap();
-    }
-}
-
-// Update particles (smoke, sparks, death shards)
-function updateParticles(deltaTime) {
-    const MAX_PARTICLES = (qualityLevel === 'low' ? 8 : qualityLevel === 'medium' ? 14 : 20) + 28;
-
-    for (let i = particles.length - 1; i >= 0; i--) {
-        const p = particles[i];
-
-        if (p.g) p.speedY_pps += p.g * deltaTime;
-        p.x += p.speedX_pps * deltaTime;
-        p.y += p.speedY_pps * deltaTime;
-
-        p.life -= (p.decay || PARTICLE_LIFE_DECAY_PER_SEC) * deltaTime;
-        if (p.life <= 0) {
-            particles.splice(i, 1);
-        }
-    }
-
-    if (particles.length > MAX_PARTICLES) {
-        particles.splice(0, particles.length - MAX_PARTICLES);
-    }
-}
-
-// Create smoke trail particles when character jumps (cyan-tinted puffs)
-const SMOKE_COLORS = ['#FFFFFF', '#CFF7FC', '#5CE1F2'];
-function createSmokeTrail() {
-    const numParticles = qualityLevel === 'low' ? 1 : 2 + Math.floor(Math.random() * 2);
-
-    for (let i = 0; i < numParticles; i++) {
-        particles.push({
-            x: mario.x,
-            y: mario.y + mario.height/2 + (Math.random() * 10 - 5),
-            size: 4 + Math.random() * 6,
-            speedX_pps: PARTICLE_MIN_SPEED_X_PPS + Math.random() * (PARTICLE_MAX_SPEED_X_PPS - PARTICLE_MIN_SPEED_X_PPS),
-            speedY_pps: PARTICLE_MIN_SPEED_Y_PPS + Math.random() * (PARTICLE_MAX_SPEED_Y_PPS - PARTICLE_MIN_SPEED_Y_PPS),
-            life: 1.0,
-            color: SMOKE_COLORS[(Math.random() * SMOKE_COLORS.length) | 0]
-        });
-    }
-}
-
-// Radial burst of square sparks (score pickup, death)
-function spawnBurst(x, y, count, opts) {
-    if (qualityLevel === 'low') count = Math.ceil(count / 2);
-    const o = opts || {};
-    const colors = o.colors || ['#FFFFFF', '#5CE1F2', '#6AA6FF'];
-    for (let i = 0; i < count; i++) {
-        const a = Math.random() * Math.PI * 2;
-        const sp = (o.speed || 200) * (0.35 + Math.random() * 0.65);
-        particles.push({
-            x, y,
-            size: 3 + Math.random() * (o.size || 4),
-            speedX_pps: Math.cos(a) * sp,
-            speedY_pps: Math.sin(a) * sp - (o.lift || 0),
-            g: o.gravity || 0,
-            decay: o.decay || 2.2,
-            life: 1.0,
-            color: colors[(Math.random() * colors.length) | 0]
-        });
-    }
-}
-
-function updateFloaters(deltaTime) {
-    for (let i = floaters.length - 1; i >= 0; i--) {
-        const f = floaters[i];
-        f.y -= 46 * deltaTime;
-        f.life -= 1.6 * deltaTime;
-        if (f.life <= 0) floaters.splice(i, 1);
-    }
-}
-
-function renderFloaters() {
-    if (floaters.length === 0) return;
-    ctx.save();
-    ctx.font = '14px PressStart2P, monospace';
-    ctx.textAlign = 'center';
-    for (const f of floaters) {
-        const t = Math.min(1, f.life);
-        const s = 1 + (1 - t) * 0.0 + Math.max(0, f.life - 0.8) * 1.2; // pop in
-        ctx.globalAlpha = t;
-        ctx.save();
-        ctx.translate(f.x, f.y);
-        ctx.scale(s, s);
-        ctx.fillStyle = '#04060A';
-        ctx.fillText(f.text, 2, 2);
-        ctx.fillStyle = '#5CE1F2';
-        ctx.fillText(f.text, 0, 0);
-        ctx.restore();
-    }
-    ctx.restore();
-}
-
-// Soft cyan halo, rendered once to an offscreen canvas and reused every frame
 function ensureGlowSprite() {
-    if (glowSprite) return glowSprite;
+    if (glowSprite && glowDpr === currentDpr) return glowSprite;
+    const size = Math.round(80 * currentDpr);
     const c = document.createElement('canvas');
-    c.width = c.height = 96;
+    c.width = c.height = size;
     const g = c.getContext('2d');
-    const grad = g.createRadialGradient(48, 48, 2, 48, 48, 48);
+    const r = size / 2;
+    const grad = g.createRadialGradient(r, r, 2, r, r, r);
     grad.addColorStop(0, 'rgba(92,225,242,0.55)');
     grad.addColorStop(0.45, 'rgba(92,225,242,0.16)');
     grad.addColorStop(1, 'rgba(92,225,242,0)');
     g.fillStyle = grad;
-    g.fillRect(0, 0, 96, 96);
+    g.fillRect(0, 0, size, size);
     glowSprite = c;
+    glowDpr = currentDpr;
     return c;
 }
 
-// Render particles (cheap: fillRect only, alpha bucketed)
-function renderParticles() {
-    if (particles.length === 0) return; // Early exit if no particles
+// ---------------------------------------------------------------------------
+// Game flow
+// ---------------------------------------------------------------------------
 
-    let currentAlpha = -1;
+function startGame() {
+    if (gameStarted && !gameOver) return;
+    if (!selectedCharacter) selectedCharacter = 'taz';
+    clearTimeout(splashTimer);
+    clearTimeout(finishTimer);
+    if (window.gameAudio) window.gameAudio.unlock();
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
 
-    for (const p of particles) {
-        const newAlpha = Math.max(0, Math.min(1, Math.floor(p.life * 10) / 10));
-        if (Math.abs(currentAlpha - newAlpha) > 0.05) {
-            ctx.globalAlpha = newAlpha;
-            currentAlpha = newAlpha;
-        }
-        
-        ctx.fillStyle = p.color;
-        
-        // Draw a pixelated square (no anti-aliasing)
-        const size = Math.floor(p.size);  // Ensure whole pixel sizes
-        const x = Math.floor(p.x);  // Ensure whole pixel positions
-        const y = Math.floor(p.y);
-        ctx.fillRect(x, y, size, size);
+    gameStarted = true;
+    gameOver = false;
+    paused = false;
+    if (pauseEl) pauseEl.classList.remove('show');
+    startScreen.style.display = 'none';
+    gameOverScreen.style.display = 'none';
+    newHighScoreSplash.classList.remove('show');
+    newHighScoreSplash.style.display = 'none';
+    canvas.style.transition = 'none';
+    canvas.style.filter = 'none';
+
+    score = 0;
+    combo = 0;
+    bestCombo = 0;
+    updateScore();
+    updateCombo();
+
+    const h = canvas.height / currentDpr;
+    dog.y = dog.py = Math.min(230, h * 0.35);
+    dog.x = dog.px = 80;
+    dog.velocity = -3.0 * 60;
+    dog.velocityX = 0.5 * 60;
+    dog.floatTimer = FLOAT_DURATION_SECONDS * 1.33;
+    dog.rotation = dog.prevRotation = 0;
+    dog.scaleX = dog.scaleY = 1;
+    dog.bob = 0;
+    dog.spin = 0;
+
+    pipes.length = 0;
+    lastPipeCentre = -1;
+    for (let i = 0; i < particles.length; i++) particles[i].on = false;
+    for (let i = 0; i < floaters.length; i++) floaters[i].on = false;
+    trailCount = 0;
+    trailHead = 0;
+    pipeTimer = PIPE_SPAWN_INTERVAL * 0.35;
+    accumulator = 0;
+    deadTime = 0;
+    qualityLevel = 'high';
+    frameSampleFill = 0;
+    frameSampleIdx = 0;
+    lastFrameTs = performance.now();
+
+    // Session tracking must never delay the first flap
+    currentSession = null;
+    if (window.gameDB) {
+        window.gameDB.createGameSession(selectedCharacter, isDarkMode).then((s) => { currentSession = s; }).catch(() => {});
     }
-    
-    // Reset alpha once at the end
-    ctx.globalAlpha = 1.0;
+
+    document.dispatchEvent(new CustomEvent('game:start'));
 }
 
-// Ghosted afterimages + halo behind the character while it is moving
-function recordTrail() {
-    trail.push(mario.x, mario.y);
-    if (trail.length > 10) trail.splice(0, 2);
+function resetGame() {
+    startGame();
 }
 
-function renderTrail(sprite) {
-    if (qualityLevel === 'low' || trail.length < 4) return;
-    const n = trail.length / 2;
-    // halo
-    const glow = ensureGlowSprite();
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.5;
-    ctx.drawImage(glow, mario.x + mario.width / 2 - 40, mario.y + mario.height / 2 - 40, 80, 80);
-    ctx.restore();
-    // afterimages, oldest first
-    for (let i = 0; i < n - 1; i += 2) {
-        const k = (i + 1) / n;
-        ctx.globalAlpha = k * 0.22;
-        ctx.drawImage(sprite, Math.round(trail[i * 2]), Math.round(trail[i * 2 + 1]), mario.width, mario.height);
-    }
-    ctx.globalAlpha = 1;
+function pauseGame() {
+    if (!isPlaying()) return;
+    paused = true;
+    if (pauseEl) pauseEl.classList.add('show');
 }
 
-// Update game state
-function update(deltaTime) {
-    if (!gameStarted || gameOver) return;
-    
-    // Update mario with floatier physics and forward leap
-    
-    // Simple hold timer tracking
-    if (mario.holdTimer > 0) {
-        mario.holdTimer++;
-    }
-    
-    // Apply gravity
-    let currentGravity = GRAVITY_ACCEL;
-    if (mario.floatTimer > 0) {
-        currentGravity *= FLOAT_GRAVITY_MULTIPLIER;
-        mario.floatTimer -= deltaTime;
-        if (mario.floatTimer < 0) mario.floatTimer = 0; // Ensure it doesn't go negative
-    }
-    mario.velocity += currentGravity * deltaTime;
-    
-    // Update character animation frame
-    mario.animationFrameCount += MARIO_ANIM_FPS * deltaTime;
-    
-    // Add subtle idle bobbing animation for more life
-    mario.bobOffset += deltaTime * 3; // Slow bobbing
-    if (mario.bobOffset > Math.PI * 2) mario.bobOffset -= Math.PI * 2;
-    
-    if (mario.isFlapping) {
-        // Create smoke particles when flapping
-        createSmokeTrail();
-        mario.isFlapping = false;
-        
-        // Add subtle scale effect on flap for more impact
-        mario.scaleY = 1.1;
-        mario.scaleX = 0.95;
-    }
-    
-    // Smoothly return scale to normal
-    mario.scaleX = mario.scaleX * 0.9 + 1.0 * 0.1;
-    mario.scaleY = mario.scaleY * 0.9 + 1.0 * 0.1;
-    
-    // Apply vertical velocity to position
-    mario.y += mario.velocity * deltaTime;
-    
-    // Apply horizontal velocity to position with gradual slowdown
-    mario.x += mario.velocityX * deltaTime;
-    // Apply drag: V_new = V_old * (DRAG_FACTOR_PER_FRAME ^ (TARGET_FPS * deltaTime))
-    // This ensures drag is consistent regardless of frame rate.
-    mario.velocityX *= Math.pow(FORWARD_DRAG_FACTOR, 60 * deltaTime);
-    
-    // Keep character within reasonable bounds (CSS pixel space)
-    const minX = 40;
-    const maxX = (canvas.width / currentDpr) / 3;
-    if (mario.x < minX) {
-        mario.x = minX;
-        mario.velocityX = 0;
-    } else if (mario.x > maxX) {
-        mario.x = maxX;
-        mario.velocityX = 0;
-    }
-    
-    // Improved rotation system for more natural movement
-    const velocityFactor = Math.max(-400, Math.min(400, mario.velocity));
-    mario.targetRotation = (velocityFactor / 400) * 0.3; // More subtle rotation range
-    
-    // Much smoother rotation interpolation
-    const rotationSpeed = 0.15; // Faster but still smooth
-    mario.smoothRotation = mario.smoothRotation * (1 - rotationSpeed) + mario.targetRotation * rotationSpeed;
-    
-    // Clamp rotation to prevent excessive spinning
-    mario.smoothRotation = Math.max(-0.4, Math.min(0.4, mario.smoothRotation));
-    
-    // Update sprite direction based on horizontal velocity
-    if (mario.velocityX > 10) {
-        mario.scaleX = mario.scaleX * 0.95 + 1.02 * 0.05; // Face slightly forward when moving fast
-    } else if (mario.velocityX < -10) {
-        mario.scaleX = mario.scaleX * 0.95 + 0.98 * 0.05; // Face slightly backward when moving back
-    }
-    
-    // Check for collisions with ground
-    if (mario.y + mario.height > ground.y) {
-        mario.y = ground.y - mario.height;
-        gameEnd();
-    }
-    
-    // Check for collisions with ceiling
-    if (mario.y < 0) {
-        mario.y = 0;
-        mario.velocity = 0;
-    }
-    
-    // Spawn pipes
-    pipeSpawnTimer += deltaTime * 1000;
-    if (pipeSpawnTimer >= PIPE_SPAWN_INTERVAL) {
-        spawnPipe();
-        pipeSpawnTimer = 0;
-    }
-    
-    // Update pipes
-    for (let i = pipes.length - 1; i >= 0; i--) {
-        const pipe = pipes[i];
-        pipe.x -= PIPE_SPEED_PPS * deltaTime;
-        
-        // Check if pipe is off screen
-        if (pipe.x + pipe.width < 0) {
-            pipes.splice(i, 1);
-            continue;
-        }
-        
-        // Check for collisions with pipes or if player tries to go around (force them through the gap)
-        if (checkCollision(mario, pipe.top) || checkCollision(mario, pipe.bottom) || 
-            // Check if player tries to fly over or under the pipes when they're in range
-            (mario.x + mario.width > pipe.x && mario.x < pipe.x + pipe.width && 
-             (mario.y < pipe.top.y + pipe.top.height || mario.y + mario.height > pipe.bottom.y))) {
-            gameEnd();
-        }
-        
-        // Check if mario passed the pipe
-        if (!pipe.passed && mario.x > pipe.x + pipe.width) {
-            pipe.passed = true;
-            score++;
-            updateScore();
-            // Juice: spark burst in the gap + rising +1
-            const gapY = pipe.top.height + (pipe.bottom.y - pipe.top.height) / 2;
-            spawnBurst(pipe.x + pipe.width, gapY, 12, { speed: 190, gravity: 240, decay: 1.9 });
-            floaters.push({ x: mario.x + mario.width / 2, y: mario.y - 6, text: '+1', life: 1.2 });
-            document.dispatchEvent(new CustomEvent('game:score', { detail: { score } }));
-            
-            // Use 8-bit audio if available
-            if (window.eightBitAudio) {
-                window.eightBitAudio.playScoreSound();
-            } else {
-                scoreSoundContext = window.gameSounds.score();
-            }
-        }
-    }
-    
-    recordTrail();
-    updateParticles(deltaTime);
-    updateFloaters(deltaTime);
+function resumeGame() {
+    if (!paused) return;
+    paused = false;
+    if (pauseEl) pauseEl.classList.remove('show');
+    lastFrameTs = performance.now();
+    accumulator = 0;
 }
 
-// Render game
-function render() {
-    // PERFORMANCE OPTIMIZATION: Use fillRect for clearing (faster than clearRect)
-    ctx.fillStyle = isDarkMode ? '#0F0F0F' : '#87CEEB'; // Sky color
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw the background
-    drawBackground();
-    
-    // Draw pipes
-    drawPipes();
-
-    // Draw the ground (textured, scrolls with the world)
-    drawGround();
-
-    // Render smoke trail particles behind character
-    renderParticles();
-
-    // On the start menu the character hasn't launched yet - don't draw the
-    // sprite floating over the menu text
-    if (!gameStarted && !gameOver) {
-        return;
-    }
-
-    // PERFORMANCE OPTIMIZATION: Streamlined character rendering
-    const charSprite = getCurrentCharacterSprite();
-
-    if (!gameOver) renderTrail(charSprite);
-
-    ctx.save();
-    
-    // Move to character position and apply rotation
-    ctx.translate(mario.x + mario.width / 2, mario.y + mario.height / 2);
-    ctx.rotate(mario.smoothRotation);
-    
-    // Apply scaling for more dynamic animation
-    ctx.scale(mario.scaleX, mario.scaleY);
-    
-    // Calculate combined animation effects
-    let animationOffset = 0;
-    
-    // Flap bounce effect (more responsive)
-    if (mario.isFlapping) {
-        animationOffset += Math.sin(mario.animationFrameCount * 3) * 2;
-    }
-    
-    // Subtle idle bobbing when not flapping actively
-    if (mario.velocity > -50 && mario.velocity < 50) {
-        animationOffset += Math.sin(mario.bobOffset) * 1.5;
-    }
-    
-    // Add slight vertical offset when moving fast horizontally
-    if (Math.abs(mario.velocityX) > 20) {
-        animationOffset += Math.sin(mario.animationFrameCount * 1.5) * 0.5;
-    }
-    
-    // Draw character with combined animation effects
-    ctx.drawImage(charSprite, 
-        -mario.width / 2, 
-        -mario.height / 2 + animationOffset, 
-        mario.width, 
-        mario.height
-    );
-    
-    ctx.restore();
-
-    renderFloaters();
-
-    // The score HUD is a DOM element (.score-display); no canvas score box
-    // needed here — drawing both stacked two boxes on top of each other.
+function flap() {
+    dog.scaleY = 0.9;
+    dog.scaleX = 1.05;
+    dog.velocity = FLAP_VELOCITY_SET;
+    dog.floatTimer = FLOAT_DURATION_SECONDS;
+    dog.velocityX = Math.max(-MAX_FORWARD_SPEED_PPS, Math.min(MAX_FORWARD_SPEED_PPS, dog.velocityX + FORWARD_LEAP_VEL_CHANGE_PPS));
+    dog.flapPulse = true;   // consumed by the next sim step (spawns smoke, squash)
+    sfx('flap');
 }
 
-// Spawn a new pipe
-function spawnPipe() {
-    // IMPORTANT: all gameplay geometry is in CSS pixels (the ctx transform
-    // maps CSS px -> device px). canvas.width/height are device pixels, so
-    // using them here put pipe gaps below the ground on high-DPR phones.
-    const viewWidth = canvas.width / currentDpr;
-    const viewHeight = canvas.height / currentDpr;
-
-    // Progressive difficulty: a generous gap for the first pipes that
-    // tightens to PIPE_GAP by ~10 points
-    const gap = PIPE_GAP + Math.max(0, 60 - score * 6);
-
-    const pipeWidth = 90; // Wider pipes for better visibility
-    const minHeight = 80; // Taller minimum pipe height
-    const maxHeight = viewHeight - gap - minHeight - GROUND_HEIGHT;
-    const topHeight = Math.floor(Math.random() * (maxHeight - minHeight + 1)) + minHeight;
-    const bottomY = topHeight + gap;
-
-    pipes.push({
-        x: viewWidth,
-        width: pipeWidth,
-        top: {
-            y: 0,
-            height: topHeight,
-            width: pipeWidth
-        },
-        bottom: {
-            y: bottomY,
-            height: viewHeight - bottomY,
-            width: pipeWidth
-        },
-        passed: false
-    });
-}
-
-// Check collision between two rectangles
-function checkCollision(rect1, rect2) {
-    return (
-        rect1.x < rect2.x + rect2.width &&
-        rect1.x + rect1.width > rect2.x &&
-        rect1.y < rect2.y + rect2.height &&
-        rect1.y + rect1.height > rect2.y
-    );
-}
-
-// End the game with GTA-style WASTED effect
-async function gameEnd() {
-    if (gameOver) return; // several collisions can land in the same frame
+function gameEnd() {
+    if (gameOver) return;
     gameOver = true;
-    trail.length = 0;
-    // Impact: shards + shake + flash
-    spawnBurst(mario.x + mario.width / 2, mario.y + mario.height / 2, 26,
-        { speed: 300, gravity: 620, lift: 90, size: 5, decay: 1.1, colors: ['#FFFFFF', '#5CE1F2', '#6AA6FF', '#FF5A6A'] });
+    deadTime = 0;
+    trailCount = 0;
+    dog.velocity = -210;                 // little death hop, then tumble
+    dog.velocityX = 0;
+    dog.spin = (Math.random() < 0.5 ? -1 : 1) * 7;
+    combo = 0;
+    updateCombo();
+
+    spawnBurst(dog.x + dog.width / 2, dog.y + dog.height / 2, 26,
+        { speed: 300, gravity: 620, lift: 90, size: 5, decay: 1.1, colors: DEATH_COLORS });
     if (window.fx) { window.fx.shake(11, 380); window.fx.flash(); }
+    sfx('hit');
     document.dispatchEvent(new CustomEvent('game:over', { detail: { score } }));
-    
-    // Check for new high score BEFORE any effects
+
     const isNewHighScore = score > highScore;
-    
     if (isNewHighScore) {
-        // NEW HIGH SCORE! Show the splash screen first
-        console.log('🎉 NEW HIGH SCORE DETECTED!', score, 'vs previous', highScore);
-        
-        // Update high score immediately
         highScore = score;
-        
-        // Show the splash screen
         showNewHighScoreSplash(score);
-        
-        // Play special high score sound
-        if (window.eightBitAudio) {
-            window.eightBitAudio.playHighScoreSound();
-        }
-        
-        // Wait for splash screen to finish, then continue with normal game over
-        setTimeout(() => {
-            continueGameEnd();
-        }, 3000); // Show splash for 3 seconds
-        
+        setTimeout(() => sfx('highScore'), 450);
+        finishTimer = setTimeout(finishGameOver, 2600);
     } else {
-        // No new high score, proceed with normal game over immediately
-        continueGameEnd();
+        finishTimer = setTimeout(finishGameOver, reducedMotion() ? 350 : 750);
     }
 }
 
-// Continue with the normal game over sequence
-async function continueGameEnd() {
-    // Apply GTA-style effects
-    applyWastedEffect();
-    
-    // Use 8-bit audio if available
-    if (window.eightBitAudio) {
-        window.eightBitAudio.playHitSound();
-        setTimeout(() => {
-            window.eightBitAudio.playGameOverSound();
-        }, 500);
-    } else {
-        hitSoundContext = window.gameSounds.hit();
-        setTimeout(() => {
-            gameOverSoundContext = window.gameSounds.gameOver();
-        }, 500);
-    }
-    
-    // Update high score using new persistent player data system
-    // The leaderboard system now handles all score tracking
-    // Just update the display with player's highest score
-    const playerData = window.leaderboardDebug ? window.leaderboardDebug.getPlayerData() : null;
-    if (playerData && playerData.highestScore > highScore) {
-        highScore = playerData.highestScore;
-    } else if (score > highScore) {
-        highScore = score;
-    }
-    
-    // Update game session in the database if available
-    try {
-        if (window.gameDB && currentSession) {
-            await window.gameDB.updateGameSession(
-                currentSession.id,
-                score,
-                mario.boostUsedCount
-            );
-        }
-    } catch (err) {
-        console.error('Error updating game session:', err);
-    }
-    
-    // Update DOM elements
+function finishGameOver() {
+    canvas.style.transition = 'filter 1.2s ease-in-out';
+    canvas.style.filter = 'grayscale(70%) contrast(115%) brightness(72%)';
+    sfx('gameOver');
+
+    const stored = window.leaderboardDebug ? window.leaderboardDebug.getPlayerData() : null;
+    if (stored && stored.highestScore > highScore) highScore = stored.highestScore;
     finalScoreDisplay.textContent = score;
     highScoreDisplay.textContent = highScore;
-    
-    // Check for high score and prompt for nickname if needed
-    if (window.checkAndPromptForPersonalBest) {
-        window.checkAndPromptForPersonalBest(score);
+
+    if (window.gameDB && currentSession) {
+        window.gameDB.updateGameSession(currentSession.id, score, 0);
     }
-    
-    // Show game over screen immediately but keep the slow reveal animation
+
     gameOverScreen.style.display = 'flex';
+    gameOverScreen.scrollTop = 0;
+    try { restartBtn.focus({ preventScroll: true }); } catch (e) { restartBtn.focus(); }
+    if (window.checkAndPromptForPersonalBest) window.checkAndPromptForPersonalBest(score);
 }
 
-// Show the NEW HIGH SCORE splash screen
-function showNewHighScoreSplash(newScore) {
-    if (newHighScoreSplash && splashScoreElement) {
-        // Update the score display
-        splashScoreElement.textContent = newScore;
-        
-        // Show the splash screen with animation
-        newHighScoreSplash.classList.add('show');
-        newHighScoreSplash.style.display = 'flex';
-        
-        console.log('✨ NEW HIGH SCORE splash screen displayed!');
-        
-        // Auto-hide after animation completes
-        setTimeout(() => {
-            newHighScoreSplash.classList.remove('show');
-            newHighScoreSplash.style.display = 'none';
-        }, 3000);
-    } else {
-        console.warn('⚠️ Splash screen elements not found');
-    }
+function showNewHighScoreSplash(n) {
+    if (!newHighScoreSplash || !splashScoreElement) return;
+    splashScoreElement.textContent = n;
+    newHighScoreSplash.style.display = 'flex';
+    void newHighScoreSplash.offsetWidth;
+    newHighScoreSplash.classList.add('show');
+    splashTimer = setTimeout(() => {
+        newHighScoreSplash.classList.remove('show');
+        newHighScoreSplash.style.display = 'none';
+    }, 2600);
 }
 
-// Update score display
 function updateScore() {
     scoreDisplay.textContent = score;
-
-    // Pop the HUD pill (CSS keyframe; restarted by toggling the class)
     scoreDisplay.classList.remove('pop');
-    void scoreDisplay.offsetWidth;
-    if (score > 0) scoreDisplay.classList.add('pop');
-}
-
-// Apply GTA-style WASTED effect
-function applyWastedEffect() {
-    // Create a desaturation filter on the canvas
-    canvas.style.transition = 'all 1.5s ease-in-out';
-    canvas.style.filter = 'grayscale(80%) contrast(120%) brightness(70%)';
-    
-    // Add a red tint to simulate GTA effect
-    const gameContainer = document.querySelector('.game-container');
-    gameContainer.style.boxShadow = 'inset 0 0 100px rgba(255, 0, 0, 0.3)';
-    
-    // Slow down the game animation
-    const slowMotionFrames = 15; // Number of frames to show slow motion
-    let frameCount = 0;
-    
-    function slowMotionRender() {
-        if (frameCount < slowMotionFrames && gameOver) {
-            render(); // Render the game at a slower pace
-            frameCount++;
-            setTimeout(slowMotionRender, 100); // Slow down the frame rate
-        }
-    }
-    
-    slowMotionRender();
-}
-
-// Add a pixelated Game Over effect
-function gameOverEffect() {
-    // Flash the canvas briefly for game over effect
-    canvas.style.filter = 'brightness(200%) contrast(200%)';
-    setTimeout(() => {
-        canvas.style.filter = 'none';
-    }, 100);
-}
-
-// Input handlers
-function handleKeyDown(e) {
-    if ((e.code === 'Space' || e.code === 'ArrowUp') && !gameOver) {
-        if (!gameStarted) {
-            startGame();
-        } else {
-            flap();
-            // Start tracking hold time
-            mario.holdTimer = 1;
-        }
+    if (score > 0) {
+        void scoreDisplay.offsetWidth; // restart the CSS keyframe
+        scoreDisplay.classList.add('pop');
     }
 }
 
-function handleKeyUp(e) {
-    if (e.code === 'Space' || e.code === 'ArrowUp') {
-        // Reset hold timer when key is released
-        mario.holdTimer = 0;
-    }
-}
-
-function handleTouchStart(e) {
-    e.preventDefault();
-    if (!gameOver) {
-        if (!gameStarted) {
-            startGame();
-        } else {
-            flap();
-            // Start tracking hold time
-            mario.holdTimer = 1;
-        }
-    }
-}
-
-function handleTouchEnd(e) {
-    e.preventDefault();
-    // Reset hold timer when touch ends
-    mario.holdTimer = 0;
-}
-
-function handleMouseDown(e) {
-    if (!gameOver) {
-        if (!gameStarted) {
-            startGame();
-        } else {
-            flap();
-            // Start tracking hold time
-            mario.holdTimer = 1;
-        }
+function updateCombo() {
+    if (!comboEl) return;
+    if (combo >= 2) {
+        comboEl.textContent = 'x' + combo;
+        comboEl.classList.remove('bump');
+        void comboEl.offsetWidth;
+        comboEl.classList.add('show', 'bump');
     } else {
-        resetGame();
+        comboEl.classList.remove('show', 'bump');
     }
 }
 
-function handleMouseUp(e) {
-    // Reset hold timer when mouse button is released
-    mario.holdTimer = 0;
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+function actionPressed() {
+    if (paused) { resumeGame(); return; }
+    if (!gameStarted) { startGame(); return; }
+    if (!gameOver) flap();
 }
 
 function handlePointerDown(e) {
     e.preventDefault();
-    if (isPointerDown) return;
-    isPointerDown = true;
+    if (gameOver) return;               // the game-over panel owns restarts
+    actionPressed();
+}
 
-    if (!gameOver) {
-        if (!gameStarted) {
-            startGame();
-        } else {
-            flap();
-            mario.holdTimer = 1;
+function handleKeyDown(e) {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    const tag = (e.target && e.target.tagName) || '';
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA';
+
+    if (e.code === 'Escape' || e.code === 'KeyP') {
+        if (typing) return;
+        if (isPlaying()) pauseGame(); else if (paused) resumeGame();
+        return;
+    }
+    const flapKey = e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW';
+    if (!flapKey || typing) return;
+
+    if (isPlaying() || paused) {          // in play, Space always flaps (never activates a focused button)
+        e.preventDefault();
+        actionPressed();
+        return;
+    }
+    if (!gameStarted && tag !== 'BUTTON' && tag !== 'A') {
+        e.preventDefault();
+        actionPressed();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simulation (fixed step)
+// ---------------------------------------------------------------------------
+
+function step(dt) {
+    dog.px = dog.x;
+    dog.py = dog.y;
+    dog.prevRotation = dog.rotation;
+    for (let i = 0; i < pipes.length; i++) pipes[i].px = pipes[i].x;
+
+    if (gameOver) { stepDead(dt); return; }
+
+    // Vertical: gravity is reduced while the float timer runs
+    let g = GRAVITY_ACCEL;
+    if (dog.floatTimer > 0) {
+        g *= FLOAT_GRAVITY_MULTIPLIER;
+        dog.floatTimer = Math.max(0, dog.floatTimer - dt);
+    }
+    dog.velocity += g * dt;
+
+    if (dog.flapPulse) {
+        dog.flapPulse = false;
+        dog.scaleY = 1.1;
+        dog.scaleX = 0.95;
+        spawnSmoke();
+    }
+    const relax = smoothing(0.1, dt);
+    dog.scaleX += (1 - dog.scaleX) * relax;
+    dog.scaleY += (1 - dog.scaleY) * relax;
+    dog.bob = (dog.bob + dt * 3) % (Math.PI * 2);
+
+    dog.y += dog.velocity * dt;
+    dog.x += dog.velocityX * dt;
+    dog.velocityX *= Math.pow(FORWARD_DRAG_FACTOR, 60 * dt);
+
+    const viewW = canvas.width / currentDpr;
+    const minX = 40, maxX = viewW / 3;
+    if (dog.x < minX) { dog.x = minX; dog.velocityX = 0; }
+    else if (dog.x > maxX) { dog.x = maxX; dog.velocityX = 0; }
+
+    const target = Math.max(-400, Math.min(400, dog.velocity)) / 400 * 0.3;
+    dog.rotation += (target - dog.rotation) * smoothing(0.15, dt);
+
+    // Hitbox is inset from the sprite: brushing a pipe with an ear is forgiven
+    const hx = dog.x + HITBOX_INSET, hy = dog.y + HITBOX_INSET;
+    const hw = dog.width - HITBOX_INSET * 2, hh = dog.height - HITBOX_INSET * 2;
+
+    if (hy + hh > ground.y) { dog.y = ground.y - hh - HITBOX_INSET; gameEnd(); return; }
+    if (dog.y < 0) { dog.y = 0; dog.velocity = 0; }
+
+    pipeTimer += dt;
+    if (pipeTimer >= PIPE_SPAWN_INTERVAL) { spawnPipe(); pipeTimer -= PIPE_SPAWN_INTERVAL; }
+
+    for (let i = pipes.length - 1; i >= 0; i--) {
+        const pipe = pipes[i];
+        pipe.x -= PIPE_SPEED_PPS * dt;
+        if (pipe.x + pipe.width < 0) { pipes.splice(i, 1); continue; }
+
+        const overlapX = hx + hw > pipe.x && hx < pipe.x + pipe.width;
+        if (overlapX) {
+            const centre = pipe.top.height + (pipe.bottom.y - pipe.top.height) / 2;
+            const dev = Math.abs(hy + hh / 2 - centre);
+            if (dev > pipe.worstDev) pipe.worstDev = dev;
+            if (hy < pipe.top.height || hy + hh > pipe.bottom.y) { gameEnd(); return; }
         }
-    } else {
-        resetGame();
+
+        if (!pipe.passed && dog.x > pipe.x + pipe.width) {
+            pipe.passed = true;
+            onPipePassed(pipe);
+        }
+    }
+
+    // trail (ring buffer)
+    trail[trailHead * 2] = dog.x;
+    trail[trailHead * 2 + 1] = dog.y;
+    trailHead = (trailHead + 1) % TRAIL_LEN;
+    if (trailCount < TRAIL_LEN) trailCount++;
+}
+
+// After death: the dog hops, tumbles and lands; pipes freeze
+function stepDead(dt) {
+    deadTime += dt;
+    dog.velocity += GRAVITY_ACCEL * 1.4 * dt;
+    dog.y += dog.velocity * dt;
+    dog.rotation += dog.spin * dt;
+    dog.spin *= Math.pow(0.5, dt * 2);
+    const floorY = ground.y - dog.height + HITBOX_INSET;
+    if (dog.y > floorY) {
+        dog.y = floorY;
+        if (dog.velocity > 160) { dog.velocity *= -0.32; dog.spin *= 0.5; } else { dog.velocity = 0; dog.spin = 0; }
     }
 }
 
-function handlePointerUp(e) {
-    e.preventDefault();
-    isPointerDown = false;
-    mario.holdTimer = 0;
+function onPipePassed(pipe) {
+    score++;
+    const perfect = pipe.worstDev <= PERFECT_WINDOW;
+    combo = perfect ? combo + 1 : 0;
+    if (combo > bestCombo) bestCombo = combo;
+    updateScore();
+    updateCombo();
+
+    const gapY = pipe.top.height + (pipe.bottom.y - pipe.top.height) / 2;
+    const px = pipe.x + pipe.width;
+    spawnBurst(px, gapY, perfect ? 18 : 10, { speed: perfect ? 240 : 180, gravity: 240, decay: 1.9 });
+
+    const milestone = score % 10 === 0;
+    let label = '+1';
+    if (milestone) label = score + '!';
+    else if (perfect && combo >= 2) label = 'PERFECT x' + combo;
+    else if (perfect) label = 'NICE';
+    addFloater(dog.x + dog.width / 2, dog.y - 6, label, milestone || combo >= 3);
+
+    if (milestone) {
+        spawnBurst(dog.x + dog.width / 2, dog.y + dog.height / 2, 30, { speed: 320, gravity: 120, decay: 1.4, size: 5 });
+        if (window.fx) window.fx.flash();
+    } else if (combo >= 3 && window.fx) {
+        window.fx.shake(Math.min(3 + combo * 0.4, 6), 160);
+    }
+
+    sfx('score', combo);
+    if (perfect && combo >= 2) sfx('perfect', combo);
+    document.dispatchEvent(new CustomEvent('game:score', { detail: { score, combo, perfect } }));
 }
 
-function handleVisibilityChange() {
-    if (document.hidden) {
-        lastTime = performance.now();
+function spawnPipe() {
+    const viewWidth = canvas.width / currentDpr;
+    const viewHeight = canvas.height / currentDpr;
+
+    // Generous gap for the first pipes, tightening to PIPE_GAP by ~10 points
+    const gap = PIPE_GAP + Math.max(0, 60 - score * 6);
+    const usable = Math.max(60, viewHeight - GROUND_HEIGHT - gap);
+    const minTop = Math.max(40, Math.min(80, usable * 0.3));
+    const maxTop = Math.max(minTop, usable - minTop);
+
+    let topHeight = Math.floor(minTop + Math.random() * (maxTop - minTop));
+    if (lastPipeCentre >= 0) {
+        // keep consecutive gaps reachable in the ~1.4 s between pipes
+        const centre = topHeight + gap / 2;
+        const clamped = Math.max(lastPipeCentre - MAX_PIPE_CENTRE_DELTA, Math.min(lastPipeCentre + MAX_PIPE_CENTRE_DELTA, centre));
+        topHeight = Math.floor(Math.max(minTop, Math.min(maxTop, clamped - gap / 2)));
+    }
+    lastPipeCentre = topHeight + gap / 2;
+
+    const bottomY = topHeight + gap;
+    pipes.push({
+        x: viewWidth, px: viewWidth, width: PIPE_WIDTH,
+        top: { y: 0, height: topHeight, width: PIPE_WIDTH },
+        bottom: { y: bottomY, height: viewHeight - bottomY, width: PIPE_WIDTH },
+        passed: false, worstDev: 0
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Particles / floaters (pooled)
+// ---------------------------------------------------------------------------
+
+function nextParticle() {
+    // Reuse the first free slot after the cursor; overwrite the oldest when full
+    for (let n = 0; n < PARTICLE_POOL; n++) {
+        const p = particles[particleCursor];
+        particleCursor = (particleCursor + 1) % PARTICLE_POOL;
+        if (!p.on) return p;
+    }
+    const p = particles[particleCursor];
+    particleCursor = (particleCursor + 1) % PARTICLE_POOL;
+    return p;
+}
+
+function spawnSmoke() {
+    if (reducedMotion()) return;
+    const n = qualityLevel === 'low' ? 1 : 2 + ((Math.random() * 2) | 0);
+    for (let i = 0; i < n; i++) {
+        const p = nextParticle();
+        p.on = true;
+        p.x = dog.x;
+        p.y = dog.y + dog.height / 2 + (Math.random() * 10 - 5);
+        p.size = 4 + Math.random() * 6;
+        p.vx = -180 + Math.random() * 120;
+        p.vy = -60 + Math.random() * 120;
+        p.g = 0;
+        p.life = 1;
+        p.decay = 3;
+        p.color = SMOKE_COLORS[(Math.random() * SMOKE_COLORS.length) | 0];
     }
 }
 
-function trackFrameTime(deltaTime) {
-    const frameMs = deltaTime * 1000;
-    frameTimeSampleMs.push(frameMs);
-    if (frameTimeSampleMs.length > FRAME_SAMPLE_SIZE) frameTimeSampleMs.shift();
-    if (frameTimeSampleMs.length < FRAME_SAMPLE_SIZE) return;
-
-    const avgFrameMs = frameTimeSampleMs.reduce((sum, value) => sum + value, 0) / frameTimeSampleMs.length;
-    if (avgFrameMs > 24) qualityLevel = 'low';
-    else if (avgFrameMs > 19) qualityLevel = 'medium';
-    else qualityLevel = 'high';
+function spawnBurst(x, y, count, o) {
+    if (reducedMotion()) return;
+    if (qualityLevel === 'low') count = Math.ceil(count / 2);
+    const colors = o.colors || BURST_COLORS;
+    for (let i = 0; i < count; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const sp = (o.speed || 200) * (0.35 + Math.random() * 0.65);
+        const p = nextParticle();
+        p.on = true;
+        p.x = x;
+        p.y = y;
+        p.size = 3 + Math.random() * (o.size || 4);
+        p.vx = Math.cos(a) * sp;
+        p.vy = Math.sin(a) * sp - (o.lift || 0);
+        p.g = o.gravity || 0;
+        p.life = 1;
+        p.decay = o.decay || 2.2;
+        p.color = colors[(Math.random() * colors.length) | 0];
+    }
 }
 
-// Initialize the game when the page loads
+function updateParticles(dt) {
+    for (let i = 0; i < PARTICLE_POOL; i++) {
+        const p = particles[i];
+        if (!p.on) continue;
+        p.vy += p.g * dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= p.decay * dt;
+        if (p.life <= 0) p.on = false;
+    }
+}
+
+function addFloater(x, y, text, big) {
+    if (reducedMotion()) return;
+    const f = floaters[floaterCursor];
+    floaterCursor = (floaterCursor + 1) % FLOATER_POOL;
+    f.on = true; f.x = x; f.y = y; f.text = text; f.life = 1.2; f.big = !!big;
+}
+
+function updateFloaters(dt) {
+    for (let i = 0; i < FLOATER_POOL; i++) {
+        const f = floaters[i];
+        if (!f.on) continue;
+        f.y -= 46 * dt;
+        f.life -= 1.6 * dt;
+        if (f.life <= 0) f.on = false;
+    }
+}
+
+function hasVisualFx() {
+    for (let i = 0; i < PARTICLE_POOL; i++) if (particles[i].on) return true;
+    for (let i = 0; i < FLOATER_POOL; i++) if (floaters[i].on) return true;
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function drawParticles() {
+    let lastBucket = -1;
+    for (let i = 0; i < PARTICLE_POOL; i++) {
+        const p = particles[i];
+        if (!p.on) continue;
+        const bucket = Math.max(0, Math.min(10, Math.floor(p.life * 10)));
+        if (bucket !== lastBucket) { ctx.globalAlpha = bucket / 10; lastBucket = bucket; }
+        ctx.fillStyle = p.color;
+        const s = Math.floor(p.size);
+        ctx.fillRect(Math.floor(p.x), Math.floor(p.y), s, s);
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawFloaters() {
+    let any = false;
+    for (let i = 0; i < FLOATER_POOL; i++) if (floaters[i].on) { any = true; break; }
+    if (!any) return;
+    ctx.textAlign = 'center';
+    for (let i = 0; i < FLOATER_POOL; i++) {
+        const f = floaters[i];
+        if (!f.on) continue;
+        const t = Math.min(1, f.life);
+        const s = (f.big ? 1.25 : 1) * (1 + Math.max(0, f.life - 0.8) * 1.2);
+        ctx.font = '14px PressStart2P, monospace';
+        ctx.globalAlpha = t;
+        ctx.setTransform(currentDpr * s, 0, 0, currentDpr * s, f.x * currentDpr, f.y * currentDpr);
+        ctx.fillStyle = '#04060A';
+        ctx.fillText(f.text, 2, 2);
+        ctx.fillStyle = f.big ? '#FFFFFF' : CYAN;
+        ctx.fillText(f.text, 0, 0);
+    }
+    ctx.setTransform(currentDpr, 0, 0, currentDpr, 0, 0);
+    ctx.globalAlpha = 1;
+}
+
+function drawDog(alpha) {
+    const sprite = spriteCache[selectedCharacter];
+    if (!sprite) return;
+    const x = dog.px + (dog.x - dog.px) * alpha;
+    const y = dog.py + (dog.y - dog.py) * alpha;
+    const rot = dog.prevRotation + (dog.rotation - dog.prevRotation) * alpha;
+    const cx = x + dog.width / 2, cy = y + dog.height / 2;
+
+    if (!gameOver && qualityLevel !== 'low' && !reducedMotion() && trailCount > 3) {
+        // soft halo
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.5;
+        ctx.drawImage(ensureGlowSprite(), cx - 40, cy - 40, 80, 80);
+        ctx.globalCompositeOperation = 'source-over';
+        // afterimages, oldest first, every 4th recorded step
+        for (let k = trailCount - 1; k > 0; k -= 4) {
+            const idx = (trailHead - 1 - k + TRAIL_LEN * 2) % TRAIL_LEN;
+            ctx.globalAlpha = (1 - k / TRAIL_LEN) * 0.22;
+            ctx.drawImage(sprite, Math.round(trail[idx * 2]), Math.round(trail[idx * 2 + 1]), dog.width, dog.height);
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Idle-hover wobble near the apex of a flap
+    const wob = (Math.abs(dog.velocity) < 50 && !gameOver) ? Math.sin(dog.bob) * 1.5 : 0;
+
+    ctx.translate(cx, cy);
+    ctx.rotate(rot);
+    ctx.scale(dog.scaleX, dog.scaleY);
+    ctx.drawImage(sprite, -dog.width / 2, -dog.height / 2 + wob, dog.width, dog.height);
+    ctx.setTransform(currentDpr, 0, 0, currentDpr, 0, 0);
+}
+
+// alpha: sim interpolation factor; frameDt: real seconds since the last drawn frame
+function drawFrame(alpha, frameDt, nowMs) {
+    ensureSpriteCache();
+    const playing = isPlaying();
+    const state = playing ? 'play' : (gameOver || paused ? 'frozen' : (reducedMotion() ? 'frozen' : 'idle'));
+    advanceScenery(frameDt, state);
+    ambient.update(frameDt, playing, isDarkMode);
+
+    drawBackground(nowMs);
+    ambient.draw(ctx, isDarkMode);
+    drawPipes(alpha);
+    drawGround();
+    drawParticles();
+
+    if (gameStarted) drawDog(alpha);
+    drawFloaters();
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+function sampleFrame(ms) {
+    frameSamples[frameSampleIdx] = ms;
+    frameSampleIdx = (frameSampleIdx + 1) % frameSamples.length;
+    if (frameSampleFill < frameSamples.length) { frameSampleFill++; return; }
+    let sum = 0;
+    for (let i = 0; i < frameSamples.length; i++) sum += frameSamples[i];
+    const avg = sum / frameSamples.length;
+    // Judged against a 60 Hz baseline: high-refresh screens report smaller values
+    qualityLevel = avg > 24 ? 'low' : avg > 19 ? 'medium' : 'high';
+}
+
+function frame(ts) {
+    rafId = requestAnimationFrame(frame);
+    if (document.hidden) return;
+
+    const running = isPlaying();
+    const dying = gameStarted && gameOver;
+
+    // Idle screens: ~30 fps unless something is animating
+    if (!running && !dying && !hasVisualFx() && ts - lastRenderTs < 32) return;
+
+    let dt = (ts - lastFrameTs) / 1000;
+    lastFrameTs = ts;
+    if (!(dt > 0)) return;
+    if (dt > MAX_FRAME_DELTA_SECONDS) dt = MAX_FRAME_DELTA_SECONDS;
+
+    const drawDt = (ts - lastRenderTs) / 1000;
+    lastRenderTs = ts;
+    if (running) sampleFrame(dt * 1000);
+
+    let alpha = 1;
+    if (running || dying) {
+        accumulator += dt;
+        let steps = 0;
+        while (accumulator >= STEP && steps < MAX_STEPS_PER_FRAME) {
+            step(STEP);
+            accumulator -= STEP;
+            steps++;
+            if (!isPlaying() && !gameOver) break;
+        }
+        if (steps === MAX_STEPS_PER_FRAME) accumulator = 0;
+        alpha = accumulator / STEP;
+    }
+
+    // Visual-only systems run on real frame time
+    updateParticles(dt);
+    updateFloaters(dt);
+
+    drawFrame(alpha, Math.min(drawDt, MAX_FRAME_DELTA_SECONDS), ts);
+}
+
 window.addEventListener('load', init);
 
 // ---------------------------------------------------------------------------
-// Expose game controls & reactive state on the global `window` object
-// This is required for helper scripts (like mobile-optimization.js) that
-// expect these functions/flags to exist.
+// Globals other scripts rely on
 // ---------------------------------------------------------------------------
 window.startGame = startGame;
 window.resetGame = resetGame;
 window.flap = flap;
-
-// Keep the boolean flags in sync via accessors so reads/writes stay reactive.
-Object.defineProperty(window, 'gameStarted', {
-    get: () => gameStarted,
-    set: (val) => { gameStarted = !!val; }
-});
-
-Object.defineProperty(window, 'gameOver', {
-    get: () => gameOver,
-    set: (val) => { gameOver = !!val; }
-});
-
+Object.defineProperty(window, 'gameStarted', { get: () => gameStarted });
+Object.defineProperty(window, 'gameOver', { get: () => gameOver });
 Object.defineProperty(window, 'selectedCharacter', {
     get: () => selectedCharacter,
-    set: (val) => { selectedCharacter = val; }
+    set: (v) => { selectedCharacter = v; }
 });
-// ---------------------------------------------------------------------------
+// Read-only introspection for tests and debugging
+window.__flattenhund = {
+    get score() { return score; },
+    get combo() { return combo; },
+    get quality() { return qualityLevel; },
+    get pipes() { return pipes.length; },
+    get dpr() { return currentDpr; },
+    get paused() { return paused; },
+    get state() { return !gameStarted ? 'menu' : gameOver ? 'dead' : paused ? 'paused' : 'play'; },
+    get dogY() { return dog.y + dog.height / 2; },
+    get gapY() {
+        for (let i = 0; i < pipes.length; i++) {
+            const p = pipes[i];
+            if (p.x + p.width > dog.x) return p.top.height + (p.bottom.y - p.top.height) / 2;
+        }
+        return null;
+    }
+};

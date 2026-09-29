@@ -1,92 +1,33 @@
-// Dark mode functionality for Flappy 8-Bit
-document.addEventListener('DOMContentLoaded', function() {
-    // DOM elements
-    const darkModeToggle = document.getElementById('dark-mode-toggle');
+// Day / night toggle. Remembers the choice; the first visit follows the OS setting.
+document.addEventListener('DOMContentLoaded', function () {
+    const toggle = document.getElementById('dark-mode-toggle');
     const body = document.body;
-    const gameContainer = document.querySelector('.game-container');
-    
-    // Check for saved preference
-    const darkModeEnabled = localStorage.getItem('darkMode') === 'true';
-    
-    // Apply saved preference if it exists
-    if (darkModeEnabled) {
-        enableDarkMode();
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+
+    function stored() {
+        try { return localStorage.getItem('darkMode'); } catch (e) { return null; }
     }
-    
-    // Create stars for night sky
-    createStars();
-    
-    // Toggle dark mode when button is clicked
-    darkModeToggle.addEventListener('click', function() {
-        if (body.classList.contains('dark-mode')) {
-            disableDarkMode();
-        } else {
-            enableDarkMode();
+
+    function apply(dark, persist) {
+        body.classList.toggle('dark-mode', dark);
+        if (toggle) {
+            toggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
+            toggle.setAttribute('aria-label', dark ? 'Switch to day mode' : 'Switch to night mode');
         }
-    });
-    
-    // Function to enable dark mode
-    function enableDarkMode() {
-        body.classList.add('dark-mode');
-        localStorage.setItem('darkMode', 'true');
-        updateGameColors(true);
-    }
-    
-    // Function to disable dark mode
-    function disableDarkMode() {
-        body.classList.remove('dark-mode');
-        localStorage.setItem('darkMode', 'false');
-        updateGameColors(false);
-    }
-    
-    // Create stars for the night sky
-    function createStars() {
-        const starsContainer = document.createElement('div');
-        starsContainer.className = 'stars';
-        
-        // Create 50 stars with random positions
-        for (let i = 0; i < 50; i++) {
-            const star = document.createElement('div');
-            star.className = 'star';
-            star.style.position = 'absolute';
-            star.style.width = (Math.random() * 2 + 1) + 'px';
-            star.style.height = star.style.width;
-            star.style.backgroundColor = '#FFFFFF';
-            star.style.left = Math.random() * 100 + '%';
-            star.style.top = Math.random() * 100 + '%';
-            star.style.opacity = Math.random() * 0.8 + 0.2;
-            
-            // Add pixel-perfect style
-            star.style.boxShadow = 'none';
-            star.style.borderRadius = '0';
-            
-            // Add subtle twinkling animation
-            if (i % 3 === 0) {
-                star.style.animation = `twinkle ${Math.random() * 3 + 2}s infinite alternate`;
-            }
-            
-            starsContainer.appendChild(star);
+        if (themeMeta) themeMeta.setAttribute('content', dark ? '#04060a' : '#0b1a2b');
+        if (persist) {
+            try { localStorage.setItem('darkMode', dark ? 'true' : 'false'); } catch (e) { /* ignore */ }
         }
-        
-        // Add stars to game container
-        gameContainer.appendChild(starsContainer);
-        
-        // Add CSS for twinkling animation
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes twinkle {
-                0% { opacity: 0.2; }
-                100% { opacity: 0.8; }
-            }
-        `;
-        document.head.appendChild(style);
+        if (window.updateGameTheme) window.updateGameTheme(dark);
     }
-    
-    // Update game colors based on mode
-    function updateGameColors(isDark) {
-        // This function will be called from game.js to update canvas colors
-        if (window.updateGameTheme) {
-            window.updateGameTheme(isDark);
-        }
+
+    const saved = stored();
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    apply(saved === null ? prefersDark : saved === 'true', false);
+
+    if (toggle) {
+        toggle.addEventListener('click', function () {
+            apply(!body.classList.contains('dark-mode'), true);
+        });
     }
 });

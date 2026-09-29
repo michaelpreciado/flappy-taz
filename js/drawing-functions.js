@@ -1,22 +1,25 @@
-// Drawing functions for Flappy 8-Bit game
-// Renders the parallax scenery, pipes and ground with day/night support.
+// Scenery renderer for Flattenhund: parallax sky, hills / skyline, ground, pipes.
 //
-// All scenery is deterministic: layouts are generated once per resize/theme
-// change from a seeded PRNG and animated with time-based offsets, so nothing
-// flickers frame to frame and nothing allocates inside the render loop.
+// Everything static is painted ONCE into offscreen canvases (sky + sun/moon,
+// hill strips, skyline strip, ground tile, pipe body/cap sprites, clouds) whenever the
+// size, DPR or day/night theme changes. A frame is then a handful of
+// drawImage calls: no per-frame allocations, no per-frame gradient or
+// path work. Layouts come from a seeded PRNG so the world never reshuffles.
+//
+// Globals used from game.js: ctx, canvas, currentDpr, ground, pipes,
+// isDarkMode, GROUND_HEIGHT, PIPE_WIDTH.
 
-// ---------------------------------------------------------------------------
-// Scenery state
-// ---------------------------------------------------------------------------
+const CAP_H = 30;      // pipe cap height (px)
+const CAP_LIP = 8;     // how far a cap overhangs the pipe body (each side)
+const STRIP_STEP = 8;  // hill column width (px)
+const GROUND_TILE = 512;
 
-let scenery = null;            // cached layout + gradients, rebuilt on resize/theme change
-let parallaxFar = 0;           // scroll offsets in px (world moves left)
+let scenery = null;
+let parallaxFar = 0;
 let parallaxMid = 0;
 let parallaxGround = 0;
 let cloudDrift = 0;
-let sceneryLastTime = 0;
 
-// Deterministic PRNG so the world doesn't reshuffle every frame
 function mulberry32(seed) {
     let a = seed >>> 0;
     return function () {
@@ -27,27 +30,16 @@ function mulberry32(seed) {
     };
 }
 
-// Cheap integer hash for tiled ground details (stable per world column)
+// Stable per-column hash for the ground tile
 function hash2(i, salt) {
     let h = (i * 374761393 + salt * 668265263) | 0;
     h = Math.imul(h ^ (h >>> 13), 1274126177);
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-// Canvas size in CSS pixels (the game's logical coordinate space)
-function viewW() {
-    const dpr = (typeof currentDpr !== 'undefined' && currentDpr) ? currentDpr : 1;
-    return canvas.width / dpr;
-}
-function viewH() {
-    const dpr = (typeof currentDpr !== 'undefined' && currentDpr) ? currentDpr : 1;
-    return canvas.height / dpr;
-}
-function groundTop() {
-    return (typeof ground !== 'undefined' && ground && ground.y)
-        ? ground.y
-        : viewH() - GROUND_HEIGHT;
-}
+function viewW() { return canvas.width / currentDpr; }
+function viewH() { return canvas.height / currentDpr; }
+function groundTop() { return ground.y || viewH() - GROUND_HEIGHT; }
 
 // ---------------------------------------------------------------------------
 // Palettes
@@ -56,22 +48,16 @@ function groundTop() {
 const SCENERY_THEMES = {
     day: {
         skyStops: [[0, '#3E8EDE'], [0.55, '#71C6E8'], [1, '#C8EFF5']],
-        farLayer: '#93D4DE',
-        midLayer: '#7CC96F',
-        midLayerShade: '#65B25A',
-        cloud: 'rgba(255,255,255,0.95)',
-        cloudShade: 'rgba(214,240,246,0.95)',
+        farLayer: '#93D4DE', midLayer: '#7CC96F', midLayerShade: '#65B25A',
+        cloud: 'rgba(255,255,255,0.95)', cloudShade: 'rgba(214,240,246,0.95)',
         grass: '#7ECB3F', grassLight: '#A8E063', grassSeam: '#5FA030',
         dirt: '#E3D18F', dirtSpeck: '#D2BE74', dirtSpeckDark: '#C0AA5E',
         pipe: { edge: '#4E8F1F', shade: '#63AD27', mid: '#74BF2E', hi: '#9FE04A', outline: '#2F5D10', rim: '#B8F06A' }
     },
     night: {
         skyStops: [[0, '#070B22'], [0.55, '#1B2340'], [1, '#40466F']],
-        farLayer: '#151B38',
-        midLayer: '#12321F',
-        midLayerShade: '#0C2617',
-        cloud: 'rgba(150,160,200,0.22)',
-        cloudShade: 'rgba(120,130,175,0.22)',
+        farLayer: '#151B38', midLayer: '#12321F', midLayerShade: '#0C2617',
+        cloud: 'rgba(150,160,200,0.22)', cloudShade: 'rgba(120,130,175,0.22)',
         grass: '#2E5D3A', grassLight: '#3E7A4C', grassSeam: '#1F4429',
         dirt: '#4A3B22', dirtSpeck: '#57462A', dirtSpeckDark: '#3C2F1A',
         pipe: { edge: '#173A22', shade: '#20512F', mid: '#2A623D', hi: '#3E7A4C', outline: '#0E2415', rim: '#5CB878', glow: 'rgba(102,242,184,0.16)', glowLine: '#66F2B8' }
@@ -79,14 +65,53 @@ const SCENERY_THEMES = {
 };
 
 // ---------------------------------------------------------------------------
-// Scenery construction (once per resize / theme change)
+// Offscreen helpers
+// ---------------------------------------------------------------------------
+
+// A DPR-scaled offscreen layer addressed in CSS pixels.
+function makeLayer(wCss, hCss) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.ceil(wCss * currentDpr));
+    c.height = Math.max(1, Math.ceil(hCss * currentDpr));
+    const g = c.getContext('2d');
+    g.setTransform(currentDpr, 0, 0, currentDpr, 0, 0);
+    g.imageSmoothingEnabled = false;
+    return { c: c, g: g, w: wCss, h: hCss };
+}
+
+function snap(v) { return Math.round(v * currentDpr) / currentDpr; }
+
+function paintDisc(g, cx, cy, r, color) {
+    g.fillStyle = color;
+    for (let y = -r; y < r; y += 4) {
+        const half = Math.floor(Math.sqrt(Math.max(0, r * r - y * y)) / 4) * 4;
+        g.fillRect(Math.round(cx - half), Math.round(cy + y), half * 2, 4);
+    }
+}
+
+// Shaded vertical pipe band table (fractions of the width)
+const PIPE_BANDS = [
+    [0.00, 0.08, 'outline'], [0.08, 0.16, 'edge'], [0.16, 0.30, 'shade'], [0.30, 0.52, 'mid'],
+    [0.52, 0.68, 'hi'], [0.68, 0.82, 'mid'], [0.82, 0.92, 'shade'], [0.92, 1.00, 'outline']
+];
+
+function paintPipeColumn(g, p, x, width, y, height) {
+    for (let i = 0; i < PIPE_BANDS.length; i++) {
+        const b = PIPE_BANDS[i];
+        g.fillStyle = p[b[2]];
+        g.fillRect(Math.round(x + width * b[0]), y, Math.max(1, Math.round(width * (b[1] - b[0]))), height);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenery construction (once per resize / DPR / theme change)
 // ---------------------------------------------------------------------------
 
 function ensureScenery() {
     const w = viewW();
     const h = viewH();
     const mode = isDarkMode ? 'night' : 'day';
-    if (scenery && scenery.w === w && scenery.h === h && scenery.mode === mode) {
+    if (scenery && scenery.w === w && scenery.h === h && scenery.mode === mode && scenery.dpr === currentDpr) {
         return scenery;
     }
 
@@ -94,381 +119,261 @@ function ensureScenery() {
     const rand = mulberry32(1337);
     const horizon = groundTop();
 
-    // Sky gradient
-    const sky = ctx.createLinearGradient(0, 0, 0, horizon + GROUND_HEIGHT * 0.4);
-    for (const [stop, color] of theme.skyStops) sky.addColorStop(stop, color);
-
-    // Stars (night only, but cheap to build always)
-    const stars = [];
-    for (let i = 0; i < 70; i++) {
-        stars.push({
-            x: rand() * w,
-            y: rand() * horizon * 0.85,
-            size: rand() < 0.85 ? 2 : 3,
-            phase: rand() * Math.PI * 2,
-            speed: 0.6 + rand() * 1.8,
-            bright: rand() < 0.12 // a few standout stars get a sparkle cross
-        });
-    }
-
-    // Clouds: pixel-art puffs described as stacked rows [dx, dy, w, h]
-    const clouds = [];
-    const cloudCount = Math.max(4, Math.round(w / 110));
-    for (let i = 0; i < cloudCount; i++) {
-        const scale = 0.7 + rand() * 1.1;
-        clouds.push({
-            x: rand() * (w + 200) - 100,
-            y: 30 + rand() * horizon * 0.42,
-            scale,
-            speed: 3 + rand() * 5,
-            alpha: 0.65 + rand() * 0.35
-        });
-    }
-
-    // Far hill silhouette: column heights from layered sines (8px steps)
-    const step = 8;
-    const cols = Math.ceil(w / step) + 2;
-    const farHeights = [];
-    const p1 = rand() * Math.PI * 2, p2 = rand() * Math.PI * 2;
-    for (let i = 0; i < cols * 3; i++) { // 3 screens wide, tiles by wrapping
-        const t = i * step * 0.011;
-        farHeights.push(
-            34 + 26 * (0.5 + 0.5 * Math.sin(t + p1)) + 14 * (0.5 + 0.5 * Math.sin(t * 2.7 + p2))
-        );
-    }
-
-    // Mid layer. Day: rolling bushes. Night: city skyline with lit windows.
-    const buildings = [];
+    // --- sky + sun/moon, one static layer ---
+    const sky = makeLayer(w, horizon + GROUND_HEIGHT * 0.4);
+    const grad = sky.g.createLinearGradient(0, 0, 0, sky.h);
+    theme.skyStops.forEach(function (s) { grad.addColorStop(s[0], s[1]); });
+    sky.g.fillStyle = grad;
+    sky.g.fillRect(0, 0, w, sky.h);
     if (mode === 'night') {
+        const mx = w * 0.78, my = horizon * 0.18, mr = 26;
+        const halo = sky.g.createRadialGradient(mx, my, mr * 0.4, mx, my, mr * 3.4);
+        halo.addColorStop(0, 'rgba(244,241,222,0.35)');
+        halo.addColorStop(1, 'rgba(244,241,222,0)');
+        sky.g.fillStyle = halo;
+        sky.g.fillRect(mx - mr * 3.4, my - mr * 3.4, mr * 6.8, mr * 6.8);
+        paintDisc(sky.g, mx, my, mr, '#F4F1DE');
+        sky.g.fillStyle = '#DDD8BC';
+        sky.g.fillRect(mx - 10, my - 4, 8, 8);
+        sky.g.fillRect(mx + 4, my + 6, 6, 6);
+        sky.g.fillRect(mx + 2, my - 14, 5, 5);
+    } else {
+        const sx = w * 0.8, sy = horizon * 0.16, sr = 30;
+        const halo = sky.g.createRadialGradient(sx, sy, sr * 0.4, sx, sy, sr * 3.2);
+        halo.addColorStop(0, 'rgba(255,236,160,0.55)');
+        halo.addColorStop(1, 'rgba(255,236,160,0)');
+        sky.g.fillStyle = halo;
+        sky.g.fillRect(sx - sr * 3.2, sy - sr * 3.2, sr * 6.4, sr * 6.4);
+        paintDisc(sky.g, sx, sy, sr, '#FFE066');
+        paintDisc(sky.g, sx, sy, sr - 8, '#FFF0A8');
+    }
+
+    // --- stars (drawn live: they twinkle). Flat typed array, no objects ---
+    const starCount = mode === 'night' ? 70 : 0;
+    const stars = new Float32Array(starCount * 5); // x, y, size, phase, speed
+    for (let i = 0; i < starCount; i++) {
+        stars[i * 5] = Math.floor(rand() * w);
+        stars[i * 5 + 1] = Math.floor(rand() * horizon * 0.85);
+        stars[i * 5 + 2] = rand() < 0.85 ? 2 : 3;
+        stars[i * 5 + 3] = rand() * Math.PI * 2;
+        stars[i * 5 + 4] = 0.6 + rand() * 1.8;
+    }
+
+    // --- hill strips: seamless (integer sine periods over the strip width) ---
+    const stripW = Math.ceil(Math.max(w, 640) * 1.5 / STRIP_STEP) * STRIP_STEP;
+    const cols = stripW / STRIP_STEP;
+    function hillStrip(base, a1, a2, wave1, wave2, color, shade) {
+        const height = Math.ceil(base + a1 + a2 + 2);
+        const L = makeLayer(stripW, height);
+        const k1 = Math.max(1, Math.round(stripW / wave1));
+        const k2 = Math.max(1, Math.round(stripW / wave2));
+        const p1 = rand() * Math.PI * 2, p2 = rand() * Math.PI * 2;
+        for (let i = 0; i < cols; i++) {
+            const u = (i / cols) * Math.PI * 2;
+            const hc = Math.floor(base + a1 * (0.5 + 0.5 * Math.sin(k1 * u + p1)) + a2 * (0.5 + 0.5 * Math.sin(k2 * u + p2)));
+            L.g.fillStyle = color;
+            L.g.fillRect(i * STRIP_STEP, height - hc, STRIP_STEP + 1, hc);
+            if (shade) {
+                L.g.fillStyle = shade;
+                L.g.fillRect(i * STRIP_STEP, height - hc * 0.45, STRIP_STEP + 1, hc * 0.45);
+            }
+        }
+        return L;
+    }
+    const far = hillStrip(34, 26, 14, 570, 210, theme.farLayer, null);
+
+    // --- mid layer: bushes (day) or lit skyline (night) ---
+    let mid;
+    if (mode === 'night') {
+        mid = makeLayer(stripW, 140);
         let x = 0;
-        const skylineWidth = w * 3;
-        while (x < skylineWidth) {
+        while (x < stripW) {
             const bw = 26 + Math.floor(rand() * 40);
-            const bh = 40 + rand() * 90;
-            const windows = [];
+            const bh = 40 + Math.floor(rand() * 90);
+            mid.g.fillStyle = '#10152C';
+            mid.g.fillRect(x, 140 - bh, bw, bh);
             for (let wx = 5; wx < bw - 6; wx += 9) {
                 for (let wy = 8; wy < bh - 6; wy += 12) {
-                    if (rand() < 0.35) {
-                        windows.push({ x: wx, y: wy, warm: rand() < 0.7 });
+                    if (rand() < 0.35 && rand() > 0.12) {
+                        mid.g.fillStyle = rand() < 0.7 ? '#FFD87A' : '#9AD9FF';
+                        mid.g.fillRect(x + wx, 140 - bh + wy, 4, 5);
                     }
                 }
             }
-            buildings.push({ x, w: bw, h: bh, windows });
             x += bw + 2 + Math.floor(rand() * 8);
         }
-    }
-    const midHeights = [];
-    const p3 = rand() * Math.PI * 2, p4 = rand() * Math.PI * 2;
-    for (let i = 0; i < cols * 3; i++) {
-        const t = i * step * 0.02;
-        midHeights.push(
-            16 + 18 * (0.5 + 0.5 * Math.sin(t + p3)) + 10 * (0.5 + 0.5 * Math.sin(t * 3.3 + p4))
-        );
+    } else {
+        mid = hillStrip(16, 18, 10, 314, 95, theme.midLayer, theme.midLayerShade);
     }
 
-    // Moon halo gradient (night)
-    const moonX = w * 0.78, moonY = horizon * 0.18, moonR = 26;
-    let moonHalo = null;
-    if (mode === 'night') {
-        moonHalo = ctx.createRadialGradient(moonX, moonY, moonR * 0.4, moonX, moonY, moonR * 3.4);
-        moonHalo.addColorStop(0, 'rgba(244,241,222,0.35)');
-        moonHalo.addColorStop(1, 'rgba(244,241,222,0)');
+    // --- clouds: one small sprite each ---
+    const clouds = [];
+    const cloudCount = Math.max(4, Math.round(w / 110));
+    for (let i = 0; i < cloudCount; i++) {
+        const u = 0.7 + rand() * 1.1;
+        const cw = Math.ceil(64 * u) + 2, ch = Math.ceil(30 * u) + 2;
+        const L = makeLayer(cw, ch);
+        L.g.fillStyle = theme.cloud;
+        L.g.fillRect(10 * u, 8 * u, 44 * u, 12 * u);
+        L.g.fillRect(0, 18 * u, 64 * u, 12 * u);
+        L.g.fillRect(20 * u, 0, 22 * u, 10 * u);
+        L.g.fillStyle = theme.cloudShade;
+        L.g.fillRect(0, 25 * u, 64 * u, 5 * u);
+        clouds.push({
+            img: L, x: rand() * (w + 200) - 100, y: 30 + rand() * horizon * 0.42 - 8 * u,
+            speed: 3 + rand() * 5, alpha: 0.65 + rand() * 0.35
+        });
     }
-    // Sun halo gradient (day)
-    const sunX = w * 0.8, sunY = horizon * 0.16, sunR = 30;
-    let sunHalo = null;
-    if (mode === 'day') {
-        sunHalo = ctx.createRadialGradient(sunX, sunY, sunR * 0.4, sunX, sunY, sunR * 3.2);
-        sunHalo.addColorStop(0, 'rgba(255,236,160,0.55)');
-        sunHalo.addColorStop(1, 'rgba(255,236,160,0)');
+
+    // --- ground tile: periodic, so scrolling is two drawImage calls ---
+    const TUFT_PAD = 8;
+    const gt = makeLayer(GROUND_TILE, GROUND_HEIGHT + TUFT_PAD);
+    const gy = TUFT_PAD;
+    gt.g.fillStyle = theme.dirt;
+    gt.g.fillRect(0, gy, GROUND_TILE, GROUND_HEIGHT);
+    const dirtCols = GROUND_TILE / 16;
+    for (let col = 0; col < dirtCols; col++) {
+        for (let row = 0; row < Math.floor((GROUND_HEIGHT - 34) / 16); row++) {
+            const r = hash2(col, row * 7 + 1);
+            if (r < 0.30) {
+                gt.g.fillStyle = r < 0.15 ? theme.dirtSpeck : theme.dirtSpeckDark;
+                const size = r < 0.08 ? 8 : 6;
+                gt.g.fillRect(col * 16 + Math.floor(hash2(col, row + 40) * 8), gy + 36 + row * 16, size, size);
+            }
+        }
+    }
+    gt.g.fillStyle = theme.grassLight; gt.g.fillRect(0, gy, GROUND_TILE, 6);
+    gt.g.fillStyle = theme.grass;      gt.g.fillRect(0, gy + 6, GROUND_TILE, 14);
+    gt.g.fillStyle = theme.grassSeam;  gt.g.fillRect(0, gy + 20, GROUND_TILE, 4);
+    for (let col = 0; col < GROUND_TILE / 8; col++) {
+        const r = hash2(col, 99);
+        if (r < 0.55) {
+            const tuftH = 2 + Math.floor(r * 8);
+            gt.g.fillStyle = r < 0.28 ? theme.grassLight : theme.grass;
+            gt.g.fillRect(col * 8, gy - tuftH, 4, tuftH);
+        }
+    }
+
+    // --- pipe sprites: body strip + two caps ---
+    const p = theme.pipe;
+    const pipeW = PIPE_WIDTH;
+    const body = makeLayer(pipeW, 8);
+    paintPipeColumn(body.g, p, 0, pipeW, 0, 8);
+    const capW = pipeW + CAP_LIP * 2;
+    function makeCap(rimOnTop) {
+        const L = makeLayer(capW, CAP_H);
+        paintPipeColumn(L.g, p, 0, capW, 0, CAP_H);
+        L.g.fillStyle = p.outline;
+        L.g.fillRect(0, rimOnTop ? CAP_H - 3 : 0, capW, 3);       // outer edge
+        L.g.fillStyle = p.glowLine || p.rim;
+        L.g.fillRect(0, rimOnTop ? 0 : CAP_H - 3, capW, 3);       // bright rim facing the gap
+        return L;
     }
 
     scenery = {
-        w, h, mode, theme, sky, stars, clouds,
-        step, farHeights, midHeights, buildings,
-        sun: { x: sunX, y: sunY, r: sunR, halo: sunHalo },
-        moon: { x: moonX, y: moonY, r: moonR, halo: moonHalo }
+        w: w, h: h, dpr: currentDpr, mode: mode, theme: theme,
+        sky: sky, stars: stars, far: far, mid: mid, stripW: stripW, clouds: clouds,
+        ground: gt, tuftPad: TUFT_PAD,
+        pipeBody: body, capTop: makeCap(false), capBottom: makeCap(true), capW: capW
     };
     return scenery;
 }
 
-// Force a scenery rebuild (theme switches mid-session)
-function invalidateScenery() {
-    scenery = null;
+function invalidateScenery() { scenery = null; }
+
+// ---------------------------------------------------------------------------
+// Scroll state (advanced once per rendered frame with real elapsed time)
+// ---------------------------------------------------------------------------
+
+// state: 'play' scrolls at game speed, 'idle' drifts slowly, 'frozen' stops.
+function advanceScenery(dt, state) {
+    if (state === 'frozen') return;
+    const playing = state === 'play';
+    parallaxFar += dt * (4 + (playing ? PIPE_SPEED_PPS * 0.10 : 0));
+    parallaxMid += dt * (9 + (playing ? PIPE_SPEED_PPS * 0.25 : 0));
+    parallaxGround += dt * (playing ? PIPE_SPEED_PPS : 12);
+    cloudDrift += dt;
 }
 
 // ---------------------------------------------------------------------------
-// Background
+// Drawing
 // ---------------------------------------------------------------------------
 
-function drawBackground() {
-    const s = ensureScenery();
-    const w = s.w;
-    const horizon = groundTop();
-    const now = performance.now();
-
-    // Advance parallax with real time; freeze the world on the game-over screen
-    let dt = sceneryLastTime ? (now - sceneryLastTime) / 1000 : 0;
-    if (dt > 0.1) dt = 0.1;
-    sceneryLastTime = now;
-    const playing = (typeof gameStarted !== 'undefined' && gameStarted) &&
-                    !(typeof gameOver !== 'undefined' && gameOver);
-    if (typeof gameOver !== 'undefined' && gameOver) dt = 0;
-
-    const pipeSpeed = (typeof PIPE_SPEED_PPS !== 'undefined') ? PIPE_SPEED_PPS : 186;
-    parallaxFar += dt * (4 + (playing ? pipeSpeed * 0.10 : 0));
-    parallaxMid += dt * (9 + (playing ? pipeSpeed * 0.25 : 0));
-    parallaxGround += dt * (playing ? pipeSpeed : 12);
-    cloudDrift += dt;
-
-    // Sky
-    ctx.fillStyle = s.sky;
-    ctx.fillRect(0, 0, w, horizon + GROUND_HEIGHT);
-
-    if (s.mode === 'night') {
-        drawStars(s, now);
-        // Moon
-        ctx.fillStyle = s.moon.halo;
-        ctx.fillRect(s.moon.x - s.moon.r * 3.4, s.moon.y - s.moon.r * 3.4, s.moon.r * 6.8, s.moon.r * 6.8);
-        drawPixelDisc(s.moon.x, s.moon.y, s.moon.r, '#F4F1DE');
-        // Craters + earthshade for an 8-bit moon
-        ctx.fillStyle = '#DDD8BC';
-        ctx.fillRect(s.moon.x - 10, s.moon.y - 4, 8, 8);
-        ctx.fillRect(s.moon.x + 4, s.moon.y + 6, 6, 6);
-        ctx.fillRect(s.moon.x + 2, s.moon.y - 14, 5, 5);
-    } else {
-        // Sun
-        ctx.fillStyle = s.sun.halo;
-        ctx.fillRect(s.sun.x - s.sun.r * 3.2, s.sun.y - s.sun.r * 3.2, s.sun.r * 6.4, s.sun.r * 6.4);
-        drawPixelDisc(s.sun.x, s.sun.y, s.sun.r, '#FFE066');
-        drawPixelDisc(s.sun.x, s.sun.y, s.sun.r - 8, '#FFF0A8');
+function drawWrapped(L, offset, y, viewWidth, stripW) {
+    let x = -(offset % stripW);
+    while (x < viewWidth) {
+        ctx.drawImage(L.c, snap(x), y, L.w, L.h);
+        x += stripW;
     }
+}
 
-    drawFarLayer(s, horizon);
-    drawMidLayer(s, horizon);
+function drawBackground(nowMs) {
+    const s = ensureScenery();
+    const horizon = groundTop();
+
+    ctx.drawImage(s.sky.c, 0, 0, s.sky.w, s.sky.h);
+    ctx.fillStyle = s.theme.skyStops[2][1];
+    ctx.fillRect(0, s.sky.h, s.w, s.h - s.sky.h);   // any sliver below the sky layer
+
+    if (s.stars.length) drawStars(s, nowMs);
+    drawWrapped(s.far, parallaxFar, horizon - s.far.h, s.w, s.stripW);
+    drawWrapped(s.mid, parallaxMid, horizon - s.mid.h, s.w, s.stripW);
     drawClouds(s);
 }
 
-// Filled "pixel circle" out of horizontal strips (crisper than arc for 8-bit)
-function drawPixelDisc(cx, cy, r, color) {
-    ctx.fillStyle = color;
-    const stepY = 4;
-    for (let y = -r; y < r; y += stepY) {
-        const half = Math.floor(Math.sqrt(Math.max(0, r * r - y * y)) / 4) * 4;
-        ctx.fillRect(Math.round(cx - half), Math.round(cy + y), half * 2, stepY);
-    }
-}
-
-// Distant hills (day) / distant ridge (night), slow parallax
-function drawFarLayer(s, horizon) {
-    const { step, farHeights, theme, w } = s;
-    const total = farHeights.length;
-    const offsetCols = Math.floor(parallaxFar / step);
-    const subOffset = parallaxFar % step;
-
-    ctx.fillStyle = theme.farLayer;
-    for (let i = -1; i <= Math.ceil(w / step); i++) {
-        const hCol = farHeights[((i + offsetCols) % total + total) % total];
-        ctx.fillRect(i * step - subOffset, horizon - hCol, step + 1, hCol);
-    }
-}
-
-// Near band: bushes (day) or city skyline with lit windows (night)
-function drawMidLayer(s, horizon) {
-    const { step, midHeights, theme, w, mode, buildings } = s;
-
-    if (mode === 'night' && buildings.length) {
-        const span = buildings[buildings.length - 1].x + buildings[buildings.length - 1].w + 10;
-        const scroll = parallaxMid % span;
-        ctx.fillStyle = theme.farLayer;
-        for (const b of buildings) {
-            let bx = b.x - scroll;
-            if (bx + b.w < 0) bx += span;
-            if (bx > w) bx -= span;
-            if (bx + b.w < 0 || bx > w) continue;
-            ctx.fillStyle = '#10152C';
-            ctx.fillRect(Math.round(bx), horizon - b.h, b.w, b.h);
-            // windows: tiny warm/cool lights, a few blink very slowly
-            for (const win of b.windows) {
-                const tick = Math.floor(performance.now() / 1700) + win.x + win.y;
-                if ((tick & 7) === 0) continue; // occasional dark window
-                ctx.fillStyle = win.warm ? '#FFD87A' : '#9AD9FF';
-                ctx.fillRect(Math.round(bx + win.x), horizon - b.h + win.y, 4, 5);
-            }
-        }
-        return;
-    }
-
-    const total = midHeights.length;
-    const offsetCols = Math.floor(parallaxMid / step);
-    const subOffset = parallaxMid % step;
-    for (let i = -1; i <= Math.ceil(w / step); i++) {
-        const hCol = midHeights[((i + offsetCols) % total + total) % total];
-        ctx.fillStyle = theme.midLayer;
-        ctx.fillRect(i * step - subOffset, horizon - hCol, step + 1, hCol);
-        ctx.fillStyle = theme.midLayerShade;
-        ctx.fillRect(i * step - subOffset, horizon - hCol * 0.45, step + 1, hCol * 0.45);
-    }
-}
-
-// Twinkling stars (deterministic positions, sine twinkle)
-function drawStars(s, now) {
-    const t = now / 1000;
-    for (const star of s.stars) {
-        const tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * star.speed + star.phase));
-        ctx.globalAlpha = tw;
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(star.x, star.y, star.size, star.size);
-        if (star.bright && tw > 0.8) {
-            ctx.globalAlpha = (tw - 0.8) * 3;
-            ctx.fillRect(star.x - star.size, star.y, star.size * 3, 1);
-            ctx.fillRect(star.x, star.y - star.size, 1, star.size * 3);
-        }
+function drawStars(s, nowMs) {
+    const t = nowMs / 1000;
+    const a = s.stars;
+    ctx.fillStyle = '#FFFFFF';
+    for (let i = 0; i < a.length; i += 5) {
+        ctx.globalAlpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * a[i + 4] + a[i + 3]));
+        ctx.fillRect(a[i], a[i + 1], a[i + 2], a[i + 2]);
     }
     ctx.globalAlpha = 1;
 }
 
-// Drifting two-tone pixel clouds
 function drawClouds(s) {
-    const w = s.w;
-    for (const c of s.clouds) {
-        let x = c.x - (cloudDrift * c.speed) % (w + 240);
-        if (x < -140) x += w + 240;
-        const u = c.scale; // one cloud "pixel" unit
+    const span = s.w + 240;
+    for (let i = 0; i < s.clouds.length; i++) {
+        const c = s.clouds[i];
+        let x = c.x - (cloudDrift * c.speed) % span;
+        if (x < -140) x += span;
         ctx.globalAlpha = c.alpha;
-        ctx.fillStyle = s.theme.cloud;
-        ctx.fillRect(x + 10 * u, c.y, 44 * u, 12 * u);
-        ctx.fillRect(x, c.y + 10 * u, 64 * u, 12 * u);
-        ctx.fillRect(x + 20 * u, c.y - 8 * u, 22 * u, 10 * u);
-        ctx.fillStyle = s.theme.cloudShade;
-        ctx.fillRect(x, c.y + 17 * u, 64 * u, 5 * u);
+        ctx.drawImage(c.img.c, snap(x), Math.round(c.y), c.img.w, c.img.h);
     }
     ctx.globalAlpha = 1;
 }
-
-// ---------------------------------------------------------------------------
-// Ground
-// ---------------------------------------------------------------------------
 
 function drawGround() {
     const s = ensureScenery();
-    const theme = s.theme;
-    const w = s.w;
-    const groundY = groundTop();
     const scroll = Math.floor(parallaxGround);
-
-    // Dirt body
-    ctx.fillStyle = theme.dirt;
-    ctx.fillRect(0, groundY, w, GROUND_HEIGHT);
-
-    // Deterministic dirt speckles, tiled by world column so they scroll
-    for (let x = -(scroll % 16); x < w; x += 16) {
-        const col = Math.floor((x + scroll) / 16);
-        for (let row = 0; row < Math.floor((GROUND_HEIGHT - 34) / 16); row++) {
-            const r = hash2(col, row * 7 + 1);
-            if (r < 0.30) {
-                ctx.fillStyle = r < 0.15 ? theme.dirtSpeck : theme.dirtSpeckDark;
-                const size = r < 0.08 ? 8 : 6;
-                ctx.fillRect(x + Math.floor(hash2(col, row + 40) * 8), groundY + 36 + row * 16, size, size);
-            }
-        }
-    }
-
-    // Grass strip: highlight, body, seam
-    ctx.fillStyle = theme.grassLight;
-    ctx.fillRect(0, groundY, w, 6);
-    ctx.fillStyle = theme.grass;
-    ctx.fillRect(0, groundY + 6, w, 14);
-    ctx.fillStyle = theme.grassSeam;
-    ctx.fillRect(0, groundY + 20, w, 4);
-
-    // Deterministic grass tufts above the strip (scroll with the ground)
-    for (let x = -(scroll % 12); x < w; x += 12) {
-        const col = Math.floor((x + scroll) / 12);
-        const r = hash2(col, 99);
-        if (r < 0.7) {
-            const tuftH = 2 + Math.floor(r * 6);
-            ctx.fillStyle = r < 0.35 ? theme.grassLight : theme.grass;
-            ctx.fillRect(x, groundY - tuftH, 4, tuftH);
-        }
+    const y = groundTop() - s.tuftPad;
+    for (let x = -(scroll % GROUND_TILE); x < s.w; x += GROUND_TILE) {
+        ctx.drawImage(s.ground.c, x, y, s.ground.w, s.ground.h);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pipes
-// ---------------------------------------------------------------------------
-
-function drawPipes() {
-    for (const pipe of pipes) {
-        drawPipe(pipe);
-    }
-}
-
-// A pixel-shaded pipe column: dark edges -> mid tones -> highlight stripe
-function drawPipeColumn(p, x, width, y, height) {
-    if (height <= 0) return;
-    const bands = [
-        [0.00, 0.08, p.outline],
-        [0.08, 0.16, p.edge],
-        [0.16, 0.30, p.shade],
-        [0.30, 0.52, p.mid],
-        [0.52, 0.68, p.hi],
-        [0.68, 0.82, p.mid],
-        [0.82, 0.92, p.shade],
-        [0.92, 1.00, p.outline]
-    ];
-    for (const [from, to, color] of bands) {
-        ctx.fillStyle = color;
-        const bx = Math.round(x + width * from);
-        const bw = Math.max(1, Math.round(width * (to - from)));
-        ctx.fillRect(bx, y, bw, height);
-    }
-}
-
-function drawPipe(pipe) {
+// alpha: render interpolation between the last two fixed simulation steps
+function drawPipes(alpha) {
+    if (pipes.length === 0) return;
     const s = ensureScenery();
-    const p = s.theme.pipe;
-    const capHeight = 30;
-    const capLip = 8;
-    const width = pipe.width;
     const groundY = groundTop();
+    const glow = s.theme.pipe.glow;
+    for (let i = 0; i < pipes.length; i++) {
+        const pipe = pipes[i];
+        const x = Math.round(pipe.px + (pipe.x - pipe.px) * alpha);
+        const width = pipe.width;
+        const topBodyH = pipe.top.height - CAP_H;
+        const bottomBodyY = pipe.bottom.y + CAP_H;
 
-    const topBodyH = pipe.top.height - capHeight;
-    const bottomBodyY = pipe.bottom.y + capHeight;
-    const bottomBodyH = Math.max(0, groundY - bottomBodyY);
-
-    // Night pipes get a soft emissive aura so they read against the dark sky
-    if (p.glow) {
-        ctx.fillStyle = p.glow;
-        ctx.fillRect(pipe.x - capLip - 5, 0, width + capLip * 2 + 10, pipe.top.height + 5);
-        ctx.fillRect(pipe.x - capLip - 5, pipe.bottom.y - 5, width + capLip * 2 + 10, groundY - pipe.bottom.y + 5);
+        if (glow) {
+            ctx.fillStyle = glow;
+            ctx.fillRect(x - CAP_LIP - 5, 0, width + CAP_LIP * 2 + 10, pipe.top.height + 5);
+            ctx.fillRect(x - CAP_LIP - 5, pipe.bottom.y - 5, width + CAP_LIP * 2 + 10, groundY - pipe.bottom.y + 5);
+        }
+        if (topBodyH > 0) ctx.drawImage(s.pipeBody.c, x, 0, width, topBodyH);
+        if (groundY - bottomBodyY > 0) ctx.drawImage(s.pipeBody.c, x, bottomBodyY, width, groundY - bottomBodyY);
+        ctx.drawImage(s.capTop.c, x - CAP_LIP, topBodyH, s.capW, CAP_H);
+        ctx.drawImage(s.capBottom.c, x - CAP_LIP, pipe.bottom.y, s.capW, CAP_H);
     }
-
-    // Bodies
-    drawPipeColumn(p, pipe.x, width, 0, topBodyH);
-    drawPipeColumn(p, pipe.x, width, bottomBodyY, bottomBodyH);
-
-    // Caps (slightly wider, same shading, plus rim lines facing the gap)
-    drawPipeColumn(p, pipe.x - capLip, width + capLip * 2, topBodyH, capHeight);
-    drawPipeColumn(p, pipe.x - capLip, width + capLip * 2, pipe.bottom.y, capHeight);
-
-    ctx.fillStyle = p.outline;
-    ctx.fillRect(pipe.x - capLip, topBodyH, width + capLip * 2, 3);                       // top cap upper edge
-    ctx.fillRect(pipe.x - capLip, pipe.bottom.y + capHeight - 3, width + capLip * 2, 3);  // bottom cap lower edge
-
-    // Gap-facing rims: bright line to make the safe opening pop
-    ctx.fillStyle = p.glowLine || p.rim;
-    ctx.fillRect(pipe.x - capLip, pipe.top.height - 3, width + capLip * 2, 3);
-    ctx.fillRect(pipe.x - capLip, pipe.bottom.y, width + capLip * 2, 3);
 }
-
-// ---------------------------------------------------------------------------
-// Theme switching hook: rebuild cached gradients when dark mode toggles
-// ---------------------------------------------------------------------------
-
-document.addEventListener('DOMContentLoaded', function () {
-    const toggle = document.getElementById('dark-mode-toggle');
-    if (toggle) {
-        toggle.addEventListener('click', invalidateScenery);
-    }
-});
