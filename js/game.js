@@ -56,6 +56,9 @@ let currentSession = null;
 
 // Particle system for smoke trail
 let particles = [];
+let floaters = [];      // rising "+1" score pops
+let trail = [];         // recent character positions for the glow trail
+let glowSprite = null;  // pre-rendered radial glow, drawn additively
 
 let pipes = [];
 let ground = { y: 0 };
@@ -242,11 +245,21 @@ function init() {
     // Ambient background animation for the menu and game-over screens.
     // The main gameLoop renders during play; this keeps clouds drifting and
     // stars twinkling the rest of the time (cheap guard when playing).
-    requestAnimationFrame(function ambientLoop() {
-        if (!gameStarted || gameOver) {
-            render();
-        }
+    // Throttled to ~30fps on menus (the scene is slow-moving and sits behind
+    // blurred glass); runs at full rate while death FX are still animating.
+    let ambientLast = 0;
+    requestAnimationFrame(function ambientLoop(now) {
         requestAnimationFrame(ambientLoop);
+        if (gameStarted && !gameOver) return;
+        const fxActive = gameOver && (particles.length > 0 || floaters.length > 0);
+        if (!fxActive && now - ambientLast < 33) return;
+        const dt = Math.min(MAX_FRAME_DELTA_SECONDS, (now - (ambientLast || now)) / 1000);
+        ambientLast = now;
+        if (fxActive) {
+            updateParticles(dt);
+            updateFloaters(dt);
+        }
+        render();
     });
 }
 
@@ -389,10 +402,9 @@ function loadAssets() {
     marioSprite.onload = () => processSprite(marioSprite);
     
     // Environment
-    pipeTopSprite.src = 'assets/images/pipe-top.png';
-    pipeBottomSprite.src = 'assets/images/pipe-bottom.png';
-    backgroundSprite.src = 'assets/images/background.png';
-    groundSprite.src = 'assets/images/ground.png';
+    // Pipes, ground and background are drawn procedurally (drawing-functions.js);
+    // the old full-size PNGs were downloaded but never used, so they are no
+    // longer loaded.
     // Sound functions are loaded from sounds.js
     // No need to preload as they're generated on demand
 }
@@ -462,6 +474,9 @@ async function startGame() {
     
     // Clear pipes
     pipes = [];
+    particles = [];
+    floaters = [];
+    trail = [];
     pipeSpawnTimer = PIPE_SPAWN_INTERVAL * 0.35;
     frameTimeSampleMs = [];
     qualityLevel = 'high';
@@ -565,57 +580,121 @@ function flap() {
     }
 }
 
-// Update smoke trail particles
+// Update particles (smoke, sparks, death shards)
 function updateParticles(deltaTime) {
-    const MAX_PARTICLES = qualityLevel === 'low' ? 8 : qualityLevel === 'medium' ? 14 : 20;
-    
+    const MAX_PARTICLES = (qualityLevel === 'low' ? 8 : qualityLevel === 'medium' ? 14 : 20) + 28;
+
     for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
-        
-        // Update position
+
+        if (p.g) p.speedY_pps += p.g * deltaTime;
         p.x += p.speedX_pps * deltaTime;
         p.y += p.speedY_pps * deltaTime;
-        
-        // Decrease life (opacity)
-        p.life -= PARTICLE_LIFE_DECAY_PER_SEC * deltaTime;
-        
-        // Remove dead particles
+
+        p.life -= (p.decay || PARTICLE_LIFE_DECAY_PER_SEC) * deltaTime;
         if (p.life <= 0) {
             particles.splice(i, 1);
         }
     }
-    
-    // Limit particle count for performance
+
     if (particles.length > MAX_PARTICLES) {
         particles.splice(0, particles.length - MAX_PARTICLES);
     }
 }
 
-// Create smoke trail particles when character jumps
+// Create smoke trail particles when character jumps (cyan-tinted puffs)
+const SMOKE_COLORS = ['#FFFFFF', '#CFF7FC', '#5CE1F2'];
 function createSmokeTrail() {
     const numParticles = qualityLevel === 'low' ? 1 : 2 + Math.floor(Math.random() * 2);
-    
+
     for (let i = 0; i < numParticles; i++) {
         particles.push({
             x: mario.x,
             y: mario.y + mario.height/2 + (Math.random() * 10 - 5),
-            size: 4 + Math.random() * 6,  // Pixelated small squares
+            size: 4 + Math.random() * 6,
             speedX_pps: PARTICLE_MIN_SPEED_X_PPS + Math.random() * (PARTICLE_MAX_SPEED_X_PPS - PARTICLE_MIN_SPEED_X_PPS),
             speedY_pps: PARTICLE_MIN_SPEED_Y_PPS + Math.random() * (PARTICLE_MAX_SPEED_Y_PPS - PARTICLE_MIN_SPEED_Y_PPS),
-            life: 1.0,  // Full opacity to start
-            color: Math.random() > 0.5 ? '#FFFFFF' : '#EEEEEE'  // White/light gray
+            life: 1.0,
+            color: SMOKE_COLORS[(Math.random() * SMOKE_COLORS.length) | 0]
         });
     }
 }
 
-// Render smoke trail particles
+// Radial burst of square sparks (score pickup, death)
+function spawnBurst(x, y, count, opts) {
+    if (qualityLevel === 'low') count = Math.ceil(count / 2);
+    const o = opts || {};
+    const colors = o.colors || ['#FFFFFF', '#5CE1F2', '#6AA6FF'];
+    for (let i = 0; i < count; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const sp = (o.speed || 200) * (0.35 + Math.random() * 0.65);
+        particles.push({
+            x, y,
+            size: 3 + Math.random() * (o.size || 4),
+            speedX_pps: Math.cos(a) * sp,
+            speedY_pps: Math.sin(a) * sp - (o.lift || 0),
+            g: o.gravity || 0,
+            decay: o.decay || 2.2,
+            life: 1.0,
+            color: colors[(Math.random() * colors.length) | 0]
+        });
+    }
+}
+
+function updateFloaters(deltaTime) {
+    for (let i = floaters.length - 1; i >= 0; i--) {
+        const f = floaters[i];
+        f.y -= 46 * deltaTime;
+        f.life -= 1.6 * deltaTime;
+        if (f.life <= 0) floaters.splice(i, 1);
+    }
+}
+
+function renderFloaters() {
+    if (floaters.length === 0) return;
+    ctx.save();
+    ctx.font = '14px PressStart2P, monospace';
+    ctx.textAlign = 'center';
+    for (const f of floaters) {
+        const t = Math.min(1, f.life);
+        const s = 1 + (1 - t) * 0.0 + Math.max(0, f.life - 0.8) * 1.2; // pop in
+        ctx.globalAlpha = t;
+        ctx.save();
+        ctx.translate(f.x, f.y);
+        ctx.scale(s, s);
+        ctx.fillStyle = '#04060A';
+        ctx.fillText(f.text, 2, 2);
+        ctx.fillStyle = '#5CE1F2';
+        ctx.fillText(f.text, 0, 0);
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+// Soft cyan halo, rendered once to an offscreen canvas and reused every frame
+function ensureGlowSprite() {
+    if (glowSprite) return glowSprite;
+    const c = document.createElement('canvas');
+    c.width = c.height = 96;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(48, 48, 2, 48, 48, 48);
+    grad.addColorStop(0, 'rgba(92,225,242,0.55)');
+    grad.addColorStop(0.45, 'rgba(92,225,242,0.16)');
+    grad.addColorStop(1, 'rgba(92,225,242,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 96, 96);
+    glowSprite = c;
+    return c;
+}
+
+// Render particles (cheap: fillRect only, alpha bucketed)
 function renderParticles() {
     if (particles.length === 0) return; // Early exit if no particles
 
     let currentAlpha = -1;
 
     for (const p of particles) {
-        const newAlpha = Math.floor(p.life * 10) / 10;
+        const newAlpha = Math.max(0, Math.min(1, Math.floor(p.life * 10) / 10));
         if (Math.abs(currentAlpha - newAlpha) > 0.05) {
             ctx.globalAlpha = newAlpha;
             currentAlpha = newAlpha;
@@ -632,6 +711,31 @@ function renderParticles() {
     
     // Reset alpha once at the end
     ctx.globalAlpha = 1.0;
+}
+
+// Ghosted afterimages + halo behind the character while it is moving
+function recordTrail() {
+    trail.push(mario.x, mario.y);
+    if (trail.length > 10) trail.splice(0, 2);
+}
+
+function renderTrail(sprite) {
+    if (qualityLevel === 'low' || trail.length < 4) return;
+    const n = trail.length / 2;
+    // halo
+    const glow = ensureGlowSprite();
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.5;
+    ctx.drawImage(glow, mario.x + mario.width / 2 - 40, mario.y + mario.height / 2 - 40, 80, 80);
+    ctx.restore();
+    // afterimages, oldest first
+    for (let i = 0; i < n - 1; i += 2) {
+        const k = (i + 1) / n;
+        ctx.globalAlpha = k * 0.22;
+        ctx.drawImage(sprite, Math.round(trail[i * 2]), Math.round(trail[i * 2 + 1]), mario.width, mario.height);
+    }
+    ctx.globalAlpha = 1;
 }
 
 // Update game state
@@ -756,6 +860,10 @@ function update(deltaTime) {
             pipe.passed = true;
             score++;
             updateScore();
+            // Juice: spark burst in the gap + rising +1
+            const gapY = pipe.top.height + (pipe.bottom.y - pipe.top.height) / 2;
+            spawnBurst(pipe.x + pipe.width, gapY, 12, { speed: 190, gravity: 240, decay: 1.9 });
+            floaters.push({ x: mario.x + mario.width / 2, y: mario.y - 6, text: '+1', life: 1.2 });
             document.dispatchEvent(new CustomEvent('game:score', { detail: { score } }));
             
             // Use 8-bit audio if available
@@ -767,7 +875,9 @@ function update(deltaTime) {
         }
     }
     
+    recordTrail();
     updateParticles(deltaTime);
+    updateFloaters(deltaTime);
 }
 
 // Render game
@@ -796,6 +906,8 @@ function render() {
 
     // PERFORMANCE OPTIMIZATION: Streamlined character rendering
     const charSprite = getCurrentCharacterSprite();
+
+    if (!gameOver) renderTrail(charSprite);
 
     ctx.save();
     
@@ -833,6 +945,8 @@ function render() {
     );
     
     ctx.restore();
+
+    renderFloaters();
 
     // The score HUD is a DOM element (.score-display); no canvas score box
     // needed here — drawing both stacked two boxes on top of each other.
@@ -885,7 +999,13 @@ function checkCollision(rect1, rect2) {
 
 // End the game with GTA-style WASTED effect
 async function gameEnd() {
+    if (gameOver) return; // several collisions can land in the same frame
     gameOver = true;
+    trail.length = 0;
+    // Impact: shards + shake + flash
+    spawnBurst(mario.x + mario.width / 2, mario.y + mario.height / 2, 26,
+        { speed: 300, gravity: 620, lift: 90, size: 5, decay: 1.1, colors: ['#FFFFFF', '#5CE1F2', '#6AA6FF', '#FF5A6A'] });
+    if (window.fx) { window.fx.shake(11, 380); window.fx.flash(); }
     document.dispatchEvent(new CustomEvent('game:over', { detail: { score } }));
     
     // Check for new high score BEFORE any effects
@@ -996,12 +1116,11 @@ function showNewHighScoreSplash(newScore) {
 // Update score display
 function updateScore() {
     scoreDisplay.textContent = score;
-    
-    // Add a small "flash" effect to the score display
-    scoreDisplay.style.transform = 'scale(1.2)';
-    setTimeout(() => {
-        scoreDisplay.style.transform = 'scale(1)';
-    }, 100);
+
+    // Pop the HUD pill (CSS keyframe; restarted by toggling the class)
+    scoreDisplay.classList.remove('pop');
+    void scoreDisplay.offsetWidth;
+    if (score > 0) scoreDisplay.classList.add('pop');
 }
 
 // Apply GTA-style WASTED effect

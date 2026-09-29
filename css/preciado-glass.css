@@ -1,0 +1,525 @@
+/* Preciado matrix blue glass — chrome layer for the flattenhund UI.
+ *
+ * The game world keeps its retro pixel-art look (canvas, Press Start 2P
+ * headings). Everything that is "interface" — menu card, HUD, leaderboard,
+ * buttons, overlays — is one recipe: a translucent blue wash, a cyan hairline,
+ * a light catch along the top edge and a blur behind it. One lit cyan; every
+ * other tint is that cyan at some opacity.
+ *
+ * Loaded last so it can restyle the older pixel-chrome rules without
+ * touching them. */
+
+:root {
+    --bg: #04060a;
+    --cyan: #5ce1f2;
+    --cyan-deep: #2ba7c4;
+    --blue: #6aa6ff;
+    --text: #e9f2f7;
+    --text-dim: #9db0c0;
+    --text-faint: #67798a;
+    --line: rgba(120, 214, 240, 0.14);
+    --line-strong: rgba(120, 214, 240, 0.34);
+    --glass: rgba(96, 168, 200, 0.05);
+    --glass-strong: rgba(96, 168, 200, 0.09);
+    --glow: 0 0 0 1px rgba(92, 225, 242, 0.08), 0 18px 60px -28px rgba(92, 225, 242, 0.45);
+    --radius: 16px;
+    --radius-sm: 10px;
+    --blur: blur(22px) saturate(150%);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ------------------------------------------------------------ overlays */
+
+/* Menu and game-over sit on a dark vignette so the pixel scene stays
+   visible but the glass card always has contrast to read against. */
+.start-screen,
+.game-over {
+    background:
+        radial-gradient(ellipse at 50% 42%, rgba(4, 8, 14, 0.42) 0%, rgba(4, 6, 10, 0.72) 65%, rgba(4, 6, 10, 0.92) 100%);
+    color: var(--text);
+    gap: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.start-screen {
+    animation: glass-in 0.7s var(--ease) both;
+}
+
+.game-over {
+    background:
+        radial-gradient(ellipse at 50% 38%, rgba(4, 8, 14, 0.5) 0%, rgba(4, 6, 10, 0.78) 62%, rgba(4, 6, 10, 0.94) 100%);
+}
+
+.game-over[style*="flex"] > * {
+    animation: glass-rise 0.6s var(--ease) both;
+}
+.game-over[style*="flex"] > *:nth-child(2) { animation-delay: 0.08s; }
+.game-over[style*="flex"] > *:nth-child(3) { animation-delay: 0.14s; }
+.game-over[style*="flex"] > *:nth-child(4) { animation-delay: 0.2s; }
+.game-over[style*="flex"] > *:nth-child(5) { animation-delay: 0.28s; }
+
+@keyframes glass-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes glass-rise {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: none; }
+}
+
+/* Body copy on the overlays: mono, dim, and never pixel-font-heavy. */
+.start-screen p,
+.game-over p {
+    font-family: var(--mono);
+    font-size: clamp(0.72rem, 2.6vw, 0.86rem);
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 14px;
+    text-shadow: none;
+}
+
+.start-screen p:first-of-type {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: clamp(0.62rem, 2.2vw, 0.74rem);
+    color: var(--cyan);
+    opacity: 0.85;
+}
+
+/* Title: pixel font stays, the 3D block-shadow becomes a lit cyan wordmark. */
+.start-screen h1 {
+    color: var(--text);
+    -webkit-text-stroke: 0;
+    text-shadow:
+        0 0 12px rgba(92, 225, 242, 0.55),
+        0 0 32px rgba(92, 225, 242, 0.25),
+        3px 3px 0 rgba(4, 6, 10, 0.9);
+    background: var(--glass);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--glow), inset 0 1px 0 rgba(150, 240, 255, 0.28);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    animation: none;
+    transform: none;
+    margin-bottom: 22px;
+}
+.start-screen h1::before,
+.start-screen h1::after {
+    display: none;
+}
+
+/* The card that holds the character picker */
+.character-select {
+    padding: 16px 18px;
+    margin-bottom: 18px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--glass);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.18);
+    gap: 14px;
+}
+
+.character-btn,
+body.dark-mode .character-btn {
+    margin: 0;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: rgba(96, 168, 200, 0.06);
+    box-shadow: none;
+    text-shadow: none;
+    transition: transform 0.25s var(--ease), border-color 0.25s, background 0.25s, box-shadow 0.25s;
+}
+.character-btn::before { display: none; }
+
+.character-btn:hover {
+    transform: translateY(-2px);
+    border-color: var(--line-strong);
+    background: var(--glass-strong);
+}
+
+.character-btn.selected,
+.character-btn:focus,
+body.dark-mode .character-btn.selected {
+    transform: translateY(-2px) scale(1.04);
+    border-color: var(--cyan);
+    background: rgba(92, 225, 242, 0.11);
+    box-shadow: 0 0 0 1px rgba(92, 225, 242, 0.25), 0 10px 34px -12px rgba(92, 225, 242, 0.7);
+    outline: none;
+}
+
+img.character-img {
+    width: 72px;
+    height: 72px;
+    filter: none;
+    image-rendering: auto;
+}
+body.dark-mode .character-btn img.character-img { filter: none; image-rendering: auto; }
+
+/* ------------------------------------------------------------- buttons */
+
+button,
+body.dark-mode button {
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    font-size: 0.8rem;
+    color: var(--text);
+    text-shadow: none;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: rgba(92, 225, 242, 0.07);
+    box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.22);
+    transition: transform 0.25s var(--ease), border-color 0.25s, background 0.25s, box-shadow 0.25s;
+}
+button::before { display: none; }
+
+button:hover,
+body.dark-mode button:hover {
+    transform: translateY(-2px);
+    border-color: var(--cyan);
+    border-bottom-color: var(--cyan);
+    border-right-color: var(--cyan);
+    background: rgba(92, 225, 242, 0.14);
+    box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.32), 0 12px 34px -14px rgba(92, 225, 242, 0.75);
+}
+
+button:active,
+.character-btn:active {
+    transform: translateY(1px) scale(0.98);
+    transition-duration: 0.05s;
+}
+
+button:focus-visible,
+.character-btn:focus-visible {
+    outline: 2px solid var(--cyan);
+    outline-offset: 3px;
+}
+
+/* Primary action: the single lit thing on the menu. */
+#start-button,
+#restart-button {
+    font-size: clamp(0.85rem, 3vw, 1rem);
+    padding: 16px 34px;
+    min-height: 56px;
+    color: #04060a;
+    background: linear-gradient(180deg, #7deaf7, var(--cyan) 55%, var(--cyan-deep));
+    border-color: rgba(200, 250, 255, 0.6);
+    box-shadow: 0 0 0 1px rgba(92, 225, 242, 0.25), 0 14px 40px -14px rgba(92, 225, 242, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+    animation: cta-breathe 2.8s ease-in-out infinite;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+#start-button:hover,
+#restart-button:hover,
+body.dark-mode #start-button,
+body.dark-mode #start-button:hover {
+    background: linear-gradient(180deg, #a2f1fa, #6fe6f5 55%, #38b6d3);
+    box-shadow: 0 0 0 1px rgba(92, 225, 242, 0.4), 0 18px 48px -12px rgba(92, 225, 242, 1), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+body.dark-mode #start-button { background: linear-gradient(180deg, #7deaf7, var(--cyan) 55%, var(--cyan-deep)); }
+#start-button:disabled {
+    background: rgba(96, 168, 200, 0.12);
+    color: var(--text-faint);
+    box-shadow: none;
+}
+
+@keyframes cta-breathe {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(92, 225, 242, 0.25), 0 14px 40px -16px rgba(92, 225, 242, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.55); }
+    50%      { box-shadow: 0 0 0 1px rgba(92, 225, 242, 0.4),  0 16px 48px -12px rgba(92, 225, 242, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.55); }
+}
+
+/* Theme toggle */
+.mode-toggle,
+body.dark-mode .mode-toggle {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    border: 1px solid var(--line-strong);
+    background: rgba(8, 14, 20, 0.5);
+    box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.2);
+    backdrop-filter: blur(14px) saturate(150%);
+    -webkit-backdrop-filter: blur(14px) saturate(150%);
+}
+.mode-toggle::before { display: none; }
+.mode-toggle:hover { border-color: var(--cyan); }
+
+/* ----------------------------------------------------------------- HUD */
+
+.score-display .score {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.6rem;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    padding: 8px 22px;
+    min-width: 84px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: rgba(8, 14, 20, 0.5);
+    box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.24), 0 10px 30px -14px rgba(92, 225, 242, 0.6);
+    text-shadow: 0 0 14px rgba(92, 225, 242, 0.65);
+    backdrop-filter: blur(14px) saturate(150%);
+    -webkit-backdrop-filter: blur(14px) saturate(150%);
+    transform-origin: 50% 60%;
+    will-change: transform;
+}
+
+.score-display .score.pop {
+    animation: score-pop 0.38s var(--ease);
+}
+@keyframes score-pop {
+    0%   { transform: scale(1);    color: var(--cyan); }
+    35%  { transform: scale(1.28); color: #fff; box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.4), 0 0 34px rgba(92, 225, 242, 0.85); }
+    100% { transform: scale(1);    color: var(--text); }
+}
+
+/* --------------------------------------------------------- game over */
+
+.wasted-container { margin-bottom: 14px; }
+
+.wasted-text {
+    font-size: clamp(1.6rem, 8vw, 3rem);
+    color: #ff5a6a;
+    background: linear-gradient(90deg, transparent, rgba(4, 6, 10, 0.78) 18%, rgba(4, 6, 10, 0.78) 82%, transparent);
+    text-shadow: 0 0 22px rgba(255, 70, 90, 0.55), 3px 3px 0 #000;
+    animation: none;
+}
+
+.game-over p {
+    margin-bottom: 6px;
+}
+/* HUD is a menu-free element: only show it once a run has begun */
+.score-display { transition: opacity 0.4s ease; }
+body:not(.has-played) .score-display { opacity: 0; }
+
+.game-over p span {
+    font-family: var(--mono);
+    color: var(--text);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+#restart-button { margin-top: 12px; margin-bottom: 4px; }
+
+/* Leaderboard */
+.leaderboard-container {
+    width: min(92%, 440px);
+    margin: 14px auto 0;
+    padding: 12px 14px 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--glass);
+    box-shadow: var(--glow), inset 0 1px 0 rgba(150, 240, 255, 0.24);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    overflow: hidden;
+}
+
+.leaderboard-title {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-shadow: none;
+    margin: 0 0 8px;
+}
+
+.leaderboard-row {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+    padding: 7px 4px;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    color: var(--text);
+}
+#leaderboard-entries .leaderboard-row:nth-child(odd) { background: rgba(96, 168, 200, 0.05); }
+#leaderboard-entries .leaderboard-row:last-child { border-bottom: 0; }
+
+.leaderboard-row.header {
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    color: var(--text-faint);
+    border-bottom: 1px solid var(--line-strong);
+}
+
+.leaderboard-row div,
+.leaderboard-title { font-family: var(--mono); }
+.leaderboard-row .score { font-variant-numeric: tabular-nums; }
+
+/* Podium: cyan family instead of gold/silver so the palette stays single-accent */
+#leaderboard-entries .leaderboard-row:nth-child(1) .rank,
+#leaderboard-entries .leaderboard-row:nth-child(1) .name,
+#leaderboard-entries .leaderboard-row:nth-child(1) .score {
+    color: var(--cyan);
+    text-shadow: 0 0 12px rgba(92, 225, 242, 0.55);
+}
+#leaderboard-entries .leaderboard-row:nth-child(2) .rank,
+#leaderboard-entries .leaderboard-row:nth-child(2) .name,
+#leaderboard-entries .leaderboard-row:nth-child(2) .score { color: var(--blue); text-shadow: none; }
+#leaderboard-entries .leaderboard-row:nth-child(3) .rank,
+#leaderboard-entries .leaderboard-row:nth-child(3) .name,
+#leaderboard-entries .leaderboard-row:nth-child(3) .score { color: var(--text-dim); text-shadow: none; }
+
+/* Name entry */
+#new-high-score-form {
+    width: min(92%, 440px);
+    padding: 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--glass-strong);
+    box-shadow: var(--glow), inset 0 1px 0 rgba(150, 240, 255, 0.28);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    color: var(--cyan);
+}
+#new-high-score-form p { font-size: 0.7rem; letter-spacing: 0.2em; color: var(--cyan); animation: none; }
+.input-container label { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.16em; color: var(--text-dim); }
+
+#player-name {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.1em;
+    padding: 10px 12px;
+    width: 88%;
+    color: var(--text);
+    background: rgba(6, 14, 20, 0.62);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+#player-name:focus {
+    border-color: var(--cyan);
+    box-shadow: 0 0 0 3px rgba(92, 225, 242, 0.18);
+}
+#save-score-button {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    padding: 10px 18px;
+    margin-top: 10px;
+    color: var(--text);
+    text-shadow: none;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: rgba(92, 225, 242, 0.1);
+    box-shadow: inset 0 1px 0 rgba(150, 240, 255, 0.24);
+}
+
+/* ------------------------------------------------- new high score splash */
+
+.new-high-score-splash {
+    background: radial-gradient(ellipse at 50% 45%, rgba(20, 60, 80, 0.55), rgba(4, 6, 10, 0.92) 70%);
+    backdrop-filter: blur(10px) saturate(140%);
+    -webkit-backdrop-filter: blur(10px) saturate(140%);
+    animation: none;
+}
+.new-high-score-splash.show { animation: glass-in 0.5s var(--ease); }
+
+.splash-container {
+    padding: 2rem 2.2rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 22px;
+    background: var(--glass-strong);
+    box-shadow: var(--glow), 0 0 80px -20px rgba(92, 225, 242, 0.55), inset 0 1px 0 rgba(150, 240, 255, 0.34);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    animation: containerPulse 2.4s ease-in-out infinite;
+    max-width: 92vw;
+}
+@keyframes containerPulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.03); }
+}
+.splash-title {
+    color: var(--text);
+    font-size: clamp(1.1rem, 5.4vw, 2.4rem);
+    text-shadow: 0 0 16px rgba(92, 225, 242, 0.75), 0 0 46px rgba(92, 225, 242, 0.35), 3px 3px 0 #04060a;
+}
+.score-display-splash {
+    background: rgba(92, 225, 242, 0.08);
+    border: 1px solid var(--cyan);
+    border-radius: var(--radius);
+    box-shadow: 0 0 34px -8px rgba(92, 225, 242, 0.8), inset 0 1px 0 rgba(150, 240, 255, 0.3);
+}
+.score-display-splash span { color: var(--cyan); text-shadow: 0 0 18px rgba(92, 225, 242, 0.8); }
+.celebration-text { font-family: var(--mono); letter-spacing: 0.2em; color: var(--text-dim); text-shadow: none; }
+
+/* ---------------------------------------------------------- glyph rain */
+
+#matrix-rain {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;              /* above the game canvas, below every overlay */
+    pointer-events: none;
+    opacity: 0.95;
+    transition: opacity 0.8s ease;
+    mix-blend-mode: screen;
+    /* keep the middle of the screen clear for the glass card / gameplay */
+    -webkit-mask-image: radial-gradient(110% 85% at 50% 45%, transparent 12%, rgba(0, 0, 0, 0.6) 50%, #000 100%);
+            mask-image: radial-gradient(110% 85% at 50% 45%, transparent 12%, rgba(0, 0, 0, 0.6) 50%, #000 100%);
+}
+body.is-playing #matrix-rain { opacity: 0.3; }
+body.dark-mode.is-playing #matrix-rain { opacity: 0.5; }
+
+/* Screen flash on impact */
+#fx-flash {
+    position: absolute;
+    inset: 0;
+    z-index: 900;
+    pointer-events: none;
+    opacity: 0;
+    background: radial-gradient(ellipse at 50% 50%, rgba(255, 255, 255, 0.55), rgba(92, 225, 242, 0.35) 55%, rgba(92, 225, 242, 0) 100%);
+}
+#fx-flash.go { animation: fx-flash 0.42s ease-out; }
+@keyframes fx-flash {
+    0% { opacity: 0.9; }
+    100% { opacity: 0; }
+}
+
+/* CRT scanlines: static and quieter — the flicker forced a full-screen
+   repaint every frame for a barely visible effect. */
+.crt-overlay {
+    animation: none;
+    opacity: 0.22;
+}
+
+/* ---------------------------------------------------- small screens */
+
+@media (max-width: 480px) {
+    .character-select { padding: 12px; gap: 10px; }
+    img.character-img { width: 60px; height: 60px; }
+    .leaderboard-row { font-size: 0.7rem; }
+    .splash-container { padding: 1.4rem 1.2rem; }
+}
+
+@media (max-height: 640px) {
+    .start-screen h1 { margin-bottom: 12px; padding: 12px 14px; }
+    .character-select { padding: 8px 12px; margin-bottom: 10px; }
+    img.character-img { width: 52px; height: 52px; }
+    .start-screen p { margin-bottom: 8px; }
+    #start-button, #restart-button { min-height: 48px; padding: 12px 26px; }
+    .wasted-container { margin-bottom: 6px; }
+    .leaderboard-container { margin-top: 8px; }
+}
+
+/* --------------------------------------------------- reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
+    #start-button, #restart-button { animation: none !important; }
+    #matrix-rain { opacity: 0.3; }
+}

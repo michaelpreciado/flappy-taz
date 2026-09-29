@@ -114,10 +114,6 @@ class PerformanceOptimizer {
         ];
         
         const gameImages = [
-            'assets/images/background.png',
-            'assets/images/ground.png',
-            'assets/images/pipe-top.png',
-            'assets/images/pipe-bottom.png'
         ];
         
         // Always preload critical images
