@@ -1,5 +1,5 @@
 // Local development server for Flattenhund
-// SQLite-backed game server (node:sqlite, zero dependencies).
+// Game server: SQLite via node:sqlite (JSON-file fallback), zero dependencies.
 //
 // Serves the static game files AND a small JSON API that js/local-db.js talks to:
 //   GET    /api/health          - availability check
@@ -13,67 +13,42 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const { openStore } = require('./store');
 
-const PORT = process.env.PORT || 8000;
+const PORT = Number(process.env.PORT) || 8000;
+const HOST = process.env.HOST || '0.0.0.0';
 const ROOT_DIR = path.join(__dirname, '..');
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT_DIR, 'data');
-const DB_PATH = path.join(DATA_DIR, 'flattenhund.db');
+const MAX_SCORE = 100000; // sanity cap: anything above is a tampered request
 
 // ---------------------------------------------------------------------------
-// Database setup
+// Storage (SQLite when available, JSON file otherwise - see server/store.js)
 // ---------------------------------------------------------------------------
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-const isNewDatabase = !fs.existsSync(DB_PATH);
-
-const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
-
-// Seed the same optional test data as database-setup.sql, only on first run
-if (isNewDatabase) {
-  const seed = db.prepare(
-    'INSERT INTO leaderboard (name, score, character_used) VALUES (?, ?, ?)'
-  );
-  seed.run('DEV', 100, 'taz');
-  seed.run('TEST', 50, 'chloe');
-  console.log('🌱 New database created and seeded with test data');
-}
-
-const statements = {
-  topScores: db.prepare(
-    'SELECT name, score FROM leaderboard ORDER BY score DESC LIMIT ?'
-  ),
-  findPlayer: db.prepare(
-    'SELECT id, score FROM leaderboard WHERE name = ? LIMIT 1'
-  ),
-  insertScore: db.prepare(
-    'INSERT INTO leaderboard (name, score, character_used) VALUES (?, ?, ?)'
-  ),
-  updateScore: db.prepare(
-    "UPDATE leaderboard SET score = ?, character_used = ?, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?"
-  ),
-  createSession: db.prepare(
-    'INSERT INTO game_sessions (character_used, is_night_mode) VALUES (?, ?)'
-  ),
-  getSession: db.prepare('SELECT * FROM game_sessions WHERE id = ?'),
-  endSession: db.prepare(
-    "UPDATE game_sessions SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), score = ?, boost_used_count = ? WHERE id = ?"
-  ),
-};
+const { store, isNew } = openStore(DATA_DIR);
+if (isNew) console.log('New database created and seeded with test data');
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Frame-Options': 'SAMEORIGIN',
+};
+
 function sendJson(res, status, body) {
-  const payload = JSON.stringify(body);
   res.writeHead(status, {
-    'Content-Type': 'application/json',
+    ...SECURITY_HEADERS,
+    'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
   });
-  res.end(payload);
+  res.end(JSON.stringify(body));
+}
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
 }
 
 function readJsonBody(req) {
@@ -82,15 +57,16 @@ function readJsonBody(req) {
     req.on('data', (chunk) => {
       raw += chunk;
       if (raw.length > 10_000) {
-        reject(new Error('Request body too large'));
+        reject(new HttpError(413, 'Request body too large'));
         req.destroy();
       }
     });
     req.on('end', () => {
       try {
-        resolve(raw ? JSON.parse(raw) : {});
+        const parsed = raw ? JSON.parse(raw) : {};
+        resolve(parsed && typeof parsed === 'object' ? parsed : {});
       } catch {
-        reject(new Error('Invalid JSON body'));
+        reject(new HttpError(400, 'Invalid JSON body'));
       }
     });
     req.on('error', reject);
@@ -98,8 +74,33 @@ function readJsonBody(req) {
 }
 
 function isValidScore(value) {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  return Number.isInteger(value) && value >= 0 && value <= MAX_SCORE;
 }
+
+// Strip control characters and collapse whitespace; names are max 10 chars.
+function cleanText(value, max) {
+  if (typeof value !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+// Tiny per-IP limiter for write endpoints: 40 writes per minute.
+const hits = new Map();
+function rateLimited(req) {
+  const key = req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const entry = hits.get(key);
+  if (!entry || now - entry.start > 60_000) {
+    hits.set(key, { start: now, n: 1 });
+    return false;
+  }
+  entry.n += 1;
+  return entry.n > 40;
+}
+setInterval(() => {
+  const cutoff = Date.now() - 60_000;
+  for (const [k, v] of hits) if (v.start < cutoff) hits.delete(k);
+}, 60_000).unref();
 
 // ---------------------------------------------------------------------------
 // API routes (consumed by js/local-db.js)
@@ -108,67 +109,50 @@ function isValidScore(value) {
 async function handleApi(req, res, url) {
   const { pathname } = url;
 
-  // GET /api/health
   if (req.method === 'GET' && pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, backend: 'sqlite' });
+    return sendJson(res, 200, { ok: true, backend: store.backend });
   }
 
-  // GET /api/leaderboard?limit=10
   if (req.method === 'GET' && pathname === '/api/leaderboard') {
-    const limit = Math.min(
-      Math.max(parseInt(url.searchParams.get('limit'), 10) || 10, 1),
-      100
-    );
-    const rows = statements.topScores.all(limit);
-    return sendJson(res, 200, rows);
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit'), 10) || 10, 1), 100);
+    return sendJson(res, 200, store.topScores(limit));
   }
 
-  // POST /api/scores { name, score, character }
-  // Duplicate prevention:
-  // one row per player name, only updated when the new score is higher.
+  if (req.method === 'POST' && rateLimited(req)) {
+    return sendJson(res, 429, { error: 'Too many requests, slow down' });
+  }
+
+  // One row per player name; only replaced when the new score is higher.
   if (req.method === 'POST' && pathname === '/api/scores') {
     const body = await readJsonBody(req);
-    const name = typeof body.name === 'string' ? body.name.trim().substring(0, 10) : '';
-    const character = typeof body.character === 'string' ? body.character.substring(0, 50) : null;
-
+    const name = cleanText(body.name, 10);
+    const character = cleanText(body.character, 50) || null;
     if (!name || !isValidScore(body.score)) {
-      return sendJson(res, 400, { error: 'name (string) and score (non-negative integer) are required' });
+      return sendJson(res, 400, {
+        error: `name (string) and score (integer 0-${MAX_SCORE}) are required`,
+      });
     }
-
-    const existing = statements.findPlayer.get(name);
-    if (existing) {
-      if (body.score > existing.score) {
-        statements.updateScore.run(body.score, character, existing.id);
-        return sendJson(res, 200, { saved: true, updated: true, previousScore: existing.score });
-      }
-      return sendJson(res, 200, { saved: true, updated: false, previousScore: existing.score });
-    }
-
-    statements.insertScore.run(name, body.score, character);
-    return sendJson(res, 201, { saved: true, updated: false, previousScore: null });
+    const r = store.saveScore(name, body.score, character);
+    return sendJson(res, r.created ? 201 : 200, {
+      saved: r.saved, updated: r.updated, previousScore: r.previousScore,
+    });
   }
 
-  // POST /api/sessions { character, isNightMode }
   if (req.method === 'POST' && pathname === '/api/sessions') {
     const body = await readJsonBody(req);
-    const character = typeof body.character === 'string' ? body.character.substring(0, 50) : null;
-    const result = statements.createSession.run(character, body.isNightMode ? 1 : 0);
-    const session = statements.getSession.get(result.lastInsertRowid);
+    const session = store.createSession(cleanText(body.character, 50) || null, !!body.isNightMode);
     return sendJson(res, 201, session);
   }
 
-  // PATCH /api/sessions/:id { score, boostUsedCount }
   const sessionMatch = pathname.match(/^\/api\/sessions\/(\d+)$/);
   if (req.method === 'PATCH' && sessionMatch) {
-    const id = Number(sessionMatch[1]);
     const body = await readJsonBody(req);
-    const score = isValidScore(body.score) ? body.score : 0;
-    const boosts = isValidScore(body.boostUsedCount) ? body.boostUsedCount : 0;
-    const result = statements.endSession.run(score, boosts, id);
-    if (result.changes === 0) {
-      return sendJson(res, 404, { error: 'Session not found' });
-    }
-    return sendJson(res, 200, { updated: true });
+    const ok = store.endSession(
+      Number(sessionMatch[1]),
+      isValidScore(body.score) ? body.score : 0,
+      isValidScore(body.boostUsedCount) ? body.boostUsedCount : 0
+    );
+    return ok ? sendJson(res, 200, { updated: true }) : sendJson(res, 404, { error: 'Session not found' });
   }
 
   return sendJson(res, 404, { error: 'Not found' });
@@ -182,7 +166,8 @@ const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -194,27 +179,44 @@ const MIME_TYPES = {
   '.wav': 'audio/wav',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
-  '.webmanifest': 'application/manifest+json',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
-function serveStatic(res, pathname) {
-  const relativePath = pathname === '/' ? 'index.html' : pathname.slice(1);
-  const filePath = path.join(ROOT_DIR, relativePath);
+// Only the game itself is public: never the database, server code or manifests.
+const PUBLIC_TOP_LEVEL = new Set(['assets', 'css', 'js']);
+const PUBLIC_ROOT_FILES = new Set([
+  'index.html', 'style.css', 'manifest.json', 'sw.js', 'robots.txt',
+]);
 
-  // Prevent path traversal outside the project root
-  if (!filePath.startsWith(ROOT_DIR + path.sep) && filePath !== path.join(ROOT_DIR, 'index.html')) {
-    res.writeHead(403);
-    return res.end('Forbidden');
+function isPublicPath(rel) {
+  const parts = rel.split('/');
+  if (parts.some((p) => p.startsWith('.') || p === '..')) return false;
+  return parts.length === 1 ? PUBLIC_ROOT_FILES.has(rel) : PUBLIC_TOP_LEVEL.has(parts[0]);
+}
+
+function serveStatic(req, res, pathname) {
+  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  const filePath = path.resolve(ROOT_DIR, rel);
+  if (!filePath.startsWith(ROOT_DIR + path.sep) || !isPublicPath(path.relative(ROOT_DIR, filePath).split(path.sep).join('/'))) {
+    res.writeHead(404, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Not found');
   }
-
   fs.readFile(filePath, (err, content) => {
     if (err) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.writeHead(404, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Not found');
     }
-    const type = MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type });
-    res.end(content);
+    const ext = path.extname(filePath).toLowerCase();
+    const immutable = rel.startsWith('assets/');
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+      'Content-Length': content.length,
+      // Code revalidates on every load so a deploy is never stale; art/fonts are cached.
+      'Cache-Control': immutable ? 'public, max-age=86400' : 'no-cache',
+      ...(rel === 'sw.js' ? { 'Service-Worker-Allowed': '/' } : {}),
+    });
+    res.end(req.method === 'HEAD' ? undefined : content);
   });
 }
 
@@ -223,23 +225,39 @@ function serveStatic(res, pathname) {
 // ---------------------------------------------------------------------------
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-
   try {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url);
+    } else if (req.method === 'GET' || req.method === 'HEAD') {
+      serveStatic(req, res, decodeURIComponent(url.pathname));
     } else {
-      serveStatic(res, decodeURIComponent(url.pathname));
+      sendJson(res, 405, { error: 'Method not allowed' });
     }
   } catch (error) {
-    console.error('❌ Request error:', error.message);
-    if (!res.headersSent) {
-      sendJson(res, 500, { error: error.message });
-    }
+    const status = error instanceof HttpError ? error.status : (error instanceof URIError ? 400 : 500);
+    if (status === 500) console.error('Request error:', error);
+    if (!res.headersSent) sendJson(res, status, { error: status === 500 ? 'Internal error' : error.message });
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`🎮 Flattenhund local server running at http://localhost:${PORT}`);
-  console.log(`💾 SQLite database: ${DB_PATH}`);
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Try: PORT=${PORT + 1} npm start`);
+  } else {
+    console.error('Server error:', err.message);
+  }
+  process.exit(1);
 });
+
+server.listen(PORT, HOST, () => {
+  console.log(`Flattenhund running at http://localhost:${PORT}`);
+  console.log(`Storage: ${store.backend} (${store.location})`);
+});
+
+function shutdown() {
+  server.close(() => { store.close(); process.exit(0); });
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

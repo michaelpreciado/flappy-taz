@@ -1,70 +1,94 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <!-- Security update: Environment variables now properly configured -->
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>flattenhund</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Flattenhund | Retro pixel flapper</title>
+    <meta name="description" content="Flattenhund is a retro pixel-art flappy game with a matrix-blue glass UI, chiptune sound and a live leaderboard. Built by Preciado Tech.">
+    <meta name="author" content="Michael Preciado, Preciado Tech">
     <meta name="theme-color" content="#04060a">
-    <meta name="description" content="Flattenhund - a retro pixel-art flappy game by Preciado Tech.">
+    <meta name="color-scheme" content="dark light">
+    <meta name="application-name" content="Flattenhund">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Flattenhund">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="format-detection" content="telephone=no">
+
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Flattenhund">
+    <meta property="og:title" content="Flattenhund | Retro pixel flapper">
+    <meta property="og:description" content="Flap through the pipes, chase combos, top the leaderboard. Pixel art meets matrix blue glass.">
+    <meta property="og:image" content="assets/images/og-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Flattenhund title screen: pixel dog, glass menu card and falling glyphs">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Flattenhund | Retro pixel flapper">
+    <meta name="twitter:description" content="Flap through the pipes, chase combos, top the leaderboard.">
+    <meta name="twitter:image" content="assets/images/og-image.png">
+
     <link rel="icon" type="image/svg+xml" href="assets/images/icon.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/images/icon-192.png">
+    <link rel="apple-touch-icon" href="assets/images/apple-touch-icon.png">
     <link rel="manifest" href="manifest.json">
+    <link rel="preload" href="assets/fonts/PressStart2P-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="assets/images/taz.png" as="image">
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="css/dark-mode.css">
     <link rel="stylesheet" href="css/preciado-glass.css">
-    <!-- Pixel font preloading for faster rendering -->
-    <link rel="preload" href="assets/fonts/PressStart2P-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <noscript><style>.game-container::after{content:"Flattenhund needs JavaScript to run.";position:absolute;inset:0;display:grid;place-items:center;color:#e9f2f7;background:#04060a;font:14px monospace;z-index:9999}</style></noscript>
 </head>
 <body>
     <div class="game-container">
-        <div class="start-screen" id="start-screen">
-            <h1>FLATTENHUND</h1>
-            <p>Choose your character:</p>
-            <div class="character-select">
-                <button class="character-btn" id="choose-taz">
-                    <img src="assets/images/taz.png" alt="Taz" class="character-img">
+        <main class="start-screen" id="start-screen" aria-labelledby="game-title">
+            <h1 id="game-title">FLATTENHUND</h1>
+            <p class="lede" id="choose-label">Choose your character:</p>
+            <div class="character-select" role="group" aria-label="Choose your character">
+                <button class="character-btn" id="choose-taz" type="button" aria-pressed="true" aria-label="Play as Taz">
+                    <img src="assets/images/taz.png" alt="" class="character-img" width="64" height="64" decoding="async">
                 </button>
-                <button class="character-btn" id="choose-chloe">
-                    <img src="assets/images/chloe.png" alt="Chloe" class="character-img">
+                <button class="character-btn" id="choose-chloe" type="button" aria-pressed="false" aria-label="Play as Chloe">
+                    <img src="assets/images/chloe.png" alt="" class="character-img" width="64" height="64" decoding="async">
                 </button>
             </div>
-            <p>Press SPACE or tap to start and flap!</p>
-            <button id="start-button">Start Game</button>
-        </div>
+            <p class="hint">Press SPACE or tap to flap. P pauses, M mutes.</p>
+            <button id="start-button" type="button">Start Game</button>
+        </main>
         
-        <canvas id="game-canvas"></canvas>
+        <canvas id="game-canvas" role="img" aria-label="Flattenhund game field. Press space or tap to flap."></canvas>
         
         <!-- NEW HIGH SCORE Splash Screen -->
-        <div class="new-high-score-splash" id="new-high-score-splash">
+        <div class="new-high-score-splash" id="new-high-score-splash" role="status" aria-live="polite">
             <div class="splash-container">
-                <div class="sparkle-effect">✨</div>
-                <h1 class="splash-title">NEW HIGH SCORE!</h1>
+                <div class="sparkle-effect" aria-hidden="true">✨</div>
+                <h2 class="splash-title">NEW HIGH SCORE!</h2>
                 <div class="score-display-splash">
                     <span id="splash-score">0</span>
                 </div>
-                <div class="celebration-text">🎉 AWESOME! 🎉</div>
-                <div class="sparkle-effect sparkle-2">⭐</div>
-                <div class="sparkle-effect sparkle-3">💫</div>
+                <div class="celebration-text">AWESOME!</div>
+                <div class="sparkle-effect sparkle-2" aria-hidden="true">⭐</div>
+                <div class="sparkle-effect sparkle-3" aria-hidden="true">💫</div>
             </div>
         </div>
         
-        <div class="game-over" id="game-over">
+        <section class="game-over" id="game-over" aria-labelledby="wasted-title">
             <div class="wasted-container">
-                <h2 class="wasted-text">WASTED</h2>
+                <h2 class="wasted-text" id="wasted-title">WASTED</h2>
             </div>
             <p>Score: <span id="final-score">0</span></p>
             <p>High Score: <span id="high-score">0</span></p>
-            <button id="restart-button">Play Again</button>
+            <button id="restart-button" type="button">Play Again</button>
             
             <div class="leaderboard-container">
-                <h3 class="leaderboard-title">TOP SCORES</h3>
-                <div class="leaderboard">
-                    <div class="leaderboard-row header">
+                <h3 class="leaderboard-title" id="leaderboard-title">TOP SCORES</h3>
+                <div class="leaderboard" role="region" aria-labelledby="leaderboard-title">
+                    <div class="leaderboard-row header" aria-hidden="true">
                         <div class="rank">RANK</div>
                         <div class="name">NAME</div>
                         <div class="score">SCORE</div>
                     </div>
-                    <div id="leaderboard-entries">
+                    <div id="leaderboard-entries" role="list" aria-live="polite">
                         <!-- Leaderboard entries will be inserted here -->
                     </div>
                 </div>
@@ -74,46 +98,60 @@
                 <p>NEW HIGH SCORE!</p>
                 <div class="input-container">
                     <label for="player-name">ENTER YOUR NAME:</label>
-                    <input type="text" id="player-name" maxlength="10" placeholder="MAX 10 CHARS">
+                    <input type="text" id="player-name" maxlength="10" placeholder="MAX 10 CHARS" autocomplete="nickname" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-describedby="name-hint">
+                    <span class="sr-only" id="name-hint">Up to 10 characters. Press Enter to save.</span>
                 </div>
-                <button id="save-score-button">SAVE SCORE</button>
+                <button id="save-score-button" type="button">SAVE SCORE</button>
+            </div>
+        </section>
+        
+        <div class="score-display" role="status" aria-live="off">
+            <div class="score" id="score" aria-label="Score">0</div>
+            <div class="combo" id="combo" aria-hidden="true"></div>
+        </div>
+
+        <div class="pause-overlay" id="pause-overlay" role="dialog" aria-label="Paused" aria-live="polite">
+            <div class="pause-card">
+                <p class="pause-title">PAUSED</p>
+                <p class="pause-hint">Tap or press SPACE to resume</p>
             </div>
         </div>
-        
-        <div class="score-display">
-            <div class="score" id="score">0</div>
-        </div>
-        
-        <!-- Dark mode toggle button -->
-        <button id="dark-mode-toggle" class="mode-toggle" aria-label="Toggle dark mode">
-            <span class="moon-icon">🌙</span>
-            <span class="sun-icon">☀️</span>
-        </button>
-    </div>
-    
-    <!-- Leaderboard backend client (talks to the local SQLite server) -->
-    <script src="js/local-db.js"></script>
 
-    <!-- 8-bit sound system -->
-    <script src="js/sounds.js"></script>
-    <script src="js/8bit-music.js"></script>
+        <div class="hud-controls">
+            <button id="sound-toggle" class="mode-toggle" type="button" aria-pressed="false" aria-label="Sound on. Turn sound off" title="Sound (M)">
+                <svg class="icon-sound" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                    <path class="spk" d="M3 9h4l5-4v14l-5-4H3z" fill="currentColor"/>
+                    <path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7M18 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    <path class="cross" d="M16 9l5 6m0-6l-5 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+            </button>
+            <button id="dark-mode-toggle" class="mode-toggle" type="button" aria-pressed="false" aria-label="Toggle night mode" title="Day / night">
+                <span class="moon-icon" aria-hidden="true">🌙</span>
+                <span class="sun-icon" aria-hidden="true">☀️</span>
+            </button>
+        </div>
+
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+        <div class="crt-overlay" aria-hidden="true"></div>
+    </div>
+
+    <script src="js/local-db.js"></script>
+    <script src="js/audio.js"></script>
     <script src="js/drawing-functions.js"></script>
+    <script src="js/background-effects.js"></script>
     <script src="js/mobile-optimization.js"></script>
     <script src="js/game.js"></script>
     <script src="js/dark-mode.js"></script>
     <script src="js/leaderboard.js"></script>
-    <script src="js/background-effects.js"></script>
     <script src="js/fx.js"></script>
     <script>
-        // Offline cache (network-first for code, cache-first for images)
+        // Offline support. sw.js is network-first for code, so deploys are never
+        // hidden behind a stale copy; a new worker takes over on the next visit.
         if ('serviceWorker' in navigator && location.protocol !== 'file:') {
             window.addEventListener('load', function () {
                 navigator.serviceWorker.register('sw.js').catch(function () {});
             });
         }
     </script>
-    
-    <!-- Pixel effect overlay (subtle scanlines) -->
-    <div class="crt-overlay"></div>
 </body>
 </html>

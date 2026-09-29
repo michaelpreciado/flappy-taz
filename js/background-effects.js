@@ -1,357 +1,108 @@
-// Background effects for Flappy 8-Bit
-// Adds animated birds in day mode and shooting stars/UFOs in night mode
+// Ambient sky life: pixel birds by day, shooting stars and a wandering UFO by
+// night. Time-based (units per second, spawn rates per second) so it looks the
+// same at 60 and 144 Hz, and pooled so it never allocates while running.
+//
+// game.js calls ambient.update(dt, playing, night) and ambient.draw(ctx, night)
+// once per rendered frame; nothing here patches other modules.
+const ambient = (function () {
+    'use strict';
 
-// Background objects arrays
-let birds = [];
-let shootingStars = [];
-let ufos = [];
-
-// Configuration
-const MAX_BIRDS = 3;
-const MAX_SHOOTING_STARS = 2;
-const MAX_UFOS = 1;
-const BIRD_SPAWN_CHANCE = 0.01; // 1% chance per frame
-const SHOOTING_STAR_SPAWN_CHANCE = 0.005; // 0.5% chance per frame
-const UFO_SPAWN_CHANCE = 0.002; // 0.2% chance per frame
-
-// Initialize background effects
-function initBackgroundEffects() {
-    // Birds, shooting stars and UFOs will be created during the game loop
-    birds = [];
-    shootingStars = [];
-    ufos = [];
-}
-
-// Update all background effects
-function updateBackgroundEffects() {
-    if (!gameStarted || gameOver) return;
-    
-    // Check if we're in day or night mode
-    if (isDarkMode) {
-        // Night mode: shooting stars and UFOs
-        updateShootingStars();
-        updateUFOs();
-        
-        // Clear birds in night mode
-        birds = [];
-    } else {
-        // Day mode: birds
-        updateBirds();
-        
-        // Clear night objects in day mode
-        shootingStars = [];
-        ufos = [];
+    const BIRDS = 3, STARS = 2, TRAIL = 14;
+    const birds = [];
+    const stars = [];
+    const ufo = { on: false, x: 0, y: 0, vx: 0, t: 0 };
+    for (let i = 0; i < BIRDS; i++) birds.push({ on: false, x: 0, y: 0, vx: 0, size: 8, t: 0 });
+    for (let i = 0; i < STARS; i++) {
+        stars.push({ on: false, x: 0, y: 0, vx: 0, vy: 0, size: 2, life: 0, n: 0, tx: new Float32Array(TRAIL), ty: new Float32Array(TRAIL) });
     }
-}
 
-// Update birds in day mode
-function updateBirds() {
-    // Move existing birds
-    for (let i = birds.length - 1; i >= 0; i--) {
-        const bird = birds[i];
-        
-        // Move bird
-        bird.x += bird.speed;
-        
-        // Animate bird (flap wings)
-        bird.frameTimer += 1;
-        if (bird.frameTimer > 10) {
-            bird.frame = (bird.frame + 1) % 2;
-            bird.frameTimer = 0;
-        }
-        
-        // Remove if off screen
-        if (bird.x > viewW() + 20 || bird.x < -20) {
-            birds.splice(i, 1);
-        }
-    }
-    
-    // Spawn new birds randomly
-    if (birds.length < MAX_BIRDS && Math.random() < BIRD_SPAWN_CHANCE) {
-        // 50% chance to spawn from left or right
-        const fromLeft = Math.random() < 0.5;
-        const x = fromLeft ? -20 : viewW() + 20;
-        const y = 50 + Math.random() * (viewH() - GROUND_HEIGHT - 100);
-        const speed = (fromLeft ? 1 : -1) * (0.5 + Math.random() * 1);
-        
-        birds.push({
-            x: x,
-            y: y,
-            speed: speed,
-            size: 8 + Math.random() * 4, // Random size between 8-12px
-            frame: 0, // Animation frame
-            frameTimer: 0 // Timer for animation
-        });
-    }
-}
+    let horizon = 400;
+    let width = 800;
 
-// Update shooting stars in night mode
-function updateShootingStars() {
-    // Move existing shooting stars
-    for (let i = shootingStars.length - 1; i >= 0; i--) {
-        const star = shootingStars[i];
-        
-        // Move star
-        star.x += star.speedX;
-        star.y += star.speedY;
-        
-        // Update trail
-        star.trail.push({x: star.x, y: star.y});
-        if (star.trail.length > star.trailLength) {
-            star.trail.shift();
-        }
-        
-        // Decrease life
-        star.life -= 0.02;
-        
-        // Remove if off screen or dead
-        if (star.x > viewW() || star.x < 0 || star.y > viewH() || star.y < 0 || star.life <= 0) {
-            shootingStars.splice(i, 1);
-        }
-    }
-    
-    // Spawn new shooting stars randomly
-    if (shootingStars.length < MAX_SHOOTING_STARS && Math.random() < SHOOTING_STAR_SPAWN_CHANCE) {
-        const x = Math.random() * viewW();
-        const y = Math.random() * (viewH() / 3); // Only in top third of screen
-        const angle = Math.PI / 4 + Math.random() * (Math.PI / 4); // Angle between 45-90 degrees
-        const speed = 2 + Math.random() * 3;
-        
-        shootingStars.push({
-            x: x,
-            y: y,
-            speedX: Math.cos(angle) * speed,
-            speedY: Math.sin(angle) * speed,
-            size: 2 + Math.random() * 2,
-            trail: [{x: x, y: y}],
-            trailLength: 10 + Math.floor(Math.random() * 10),
-            life: 1.0
-        });
-    }
-}
+    function resize(w, groundY) { width = w; horizon = groundY; }
 
-// Update UFOs in night mode
-function updateUFOs() {
-    // Move existing UFOs
-    for (let i = ufos.length - 1; i >= 0; i--) {
-        const ufo = ufos[i];
-        
-        // Move UFO
-        ufo.x += ufo.speed;
-        
-        // Slight vertical hover effect
-        ufo.hoverOffset += ufo.hoverSpeed;
-        if (ufo.hoverOffset > Math.PI * 2) {
-            ufo.hoverOffset -= Math.PI * 2;
-        }
-        
-        // Remove if off screen
-        if (ufo.x > viewW() + 30 || ufo.x < -30) {
-            ufos.splice(i, 1);
-        }
-    }
-    
-    // Spawn new UFOs randomly
-    if (ufos.length < MAX_UFOS && Math.random() < UFO_SPAWN_CHANCE) {
-        // Always spawn from left or right edge
-        const fromLeft = Math.random() < 0.5;
-        const x = fromLeft ? -30 : viewW() + 30;
-        const y = 50 + Math.random() * 100; // Only in top portion of screen
-        const speed = (fromLeft ? 1 : -1) * (0.3 + Math.random() * 0.5);
-        
-        ufos.push({
-            x: x,
-            y: y,
-            speed: speed,
-            width: 20,
-            height: 10,
-            hoverOffset: 0,
-            hoverSpeed: 0.05,
-            beamActive: false,
-            beamTimer: 0,
-            beamDuration: 0
-        });
-    }
-}
-
-// Draw all background effects
-function drawBackgroundEffects() {
-    // Draw day mode effects
-    if (!isDarkMode) {
-        drawBirds();
-    } 
-    // Draw night mode effects
-    else {
-        drawShootingStars();
-        drawUFOs();
-    }
-}
-
-// Helper function to draw the character
-function drawCharacter() {
-    if (!gameStarted) return;
-    
-    // Use the original character drawing code from game.js
-    if (typeof window.drawMario === 'function') {
-        window.drawMario();
-    } else {
-        // Fallback simple character drawing if the original function isn't available
-        ctx.fillStyle = '#FF0000';
-        ctx.fillRect(mario.x, mario.y, mario.width, mario.height);
-    }
-}
-
-// Helper function to draw the score
-function drawScore() {
-    if (!gameStarted) return;
-    
-    // Draw score
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '20px PressStart2P';
-    ctx.textAlign = 'center';
-    ctx.fillText(score.toString(), viewW() / 2, 50);
-}
-
-// Draw birds for day mode
-function drawBirds() {
-    ctx.fillStyle = '#000000'; // Black silhouette
-    
-    for (const bird of birds) {
-        // Save context for rotation
-        ctx.save();
-        ctx.translate(bird.x, bird.y);
-        
-        // Flip bird based on direction
-        if (bird.speed < 0) {
-            ctx.scale(-1, 1);
-        }
-        
-        // Draw bird body (simple 8-bit style)
-        ctx.fillRect(-bird.size/2, -bird.size/4, bird.size, bird.size/2);
-        
-        // Draw head
-        ctx.fillRect(bird.size/2, -bird.size/2, bird.size/2, bird.size/2);
-        
-        // Draw wings (animated)
-        if (bird.frame === 0) {
-            // Wings up
-            ctx.fillRect(-bird.size/4, -bird.size/2, bird.size/2, bird.size/4);
+    function update(dt, playing, night) {
+        if (!playing) return;
+        if (night) {
+            birds.forEach(function (b) { b.on = false; });
+            // shooting stars: ~1 every 6 s
+            for (let i = 0; i < STARS; i++) {
+                const s = stars[i];
+                if (s.on) {
+                    s.x += s.vx * dt; s.y += s.vy * dt; s.life -= 1.2 * dt;
+                    // shift trail history (fixed-size ring, no allocation)
+                    for (let k = 0; k < TRAIL - 1; k++) { s.tx[k] = s.tx[k + 1]; s.ty[k] = s.ty[k + 1]; }
+                    s.tx[TRAIL - 1] = s.x; s.ty[TRAIL - 1] = s.y;
+                    if (s.life <= 0 || s.x > width + 20 || s.y > horizon) s.on = false;
+                } else if (Math.random() < dt / 6) {
+                    const ang = Math.PI * (0.2 + Math.random() * 0.15), sp = 260 + Math.random() * 220;
+                    s.on = true; s.x = Math.random() * width * 0.8; s.y = Math.random() * horizon * 0.3;
+                    s.vx = Math.cos(ang) * sp; s.vy = Math.sin(ang) * sp; s.life = 1; s.size = 2 + Math.random() * 2;
+                    for (let k = 0; k < TRAIL; k++) { s.tx[k] = s.x; s.ty[k] = s.y; }
+                }
+            }
+            // UFO: ~1 every 40 s, crosses slowly
+            if (ufo.on) {
+                ufo.x += ufo.vx * dt; ufo.t += dt;
+                if (ufo.x < -40 || ufo.x > width + 40) ufo.on = false;
+            } else if (Math.random() < dt / 40) {
+                const left = Math.random() < 0.5;
+                ufo.on = true; ufo.x = left ? -30 : width + 30; ufo.vx = (left ? 1 : -1) * (24 + Math.random() * 26);
+                ufo.y = 50 + Math.random() * 90; ufo.t = 0;
+            }
         } else {
-            // Wings down
-            ctx.fillRect(-bird.size/4, bird.size/4, bird.size/2, bird.size/4);
-        }
-        
-        // Restore context
-        ctx.restore();
-    }
-}
-
-// Draw shooting stars for night mode
-function drawShootingStars() {
-    for (const star of shootingStars) {
-        // Draw trail
-        for (let i = 0; i < star.trail.length; i++) {
-            const point = star.trail[i];
-            const alpha = (i / star.trail.length) * star.life;
-            ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
-            
-            // Size decreases along the trail
-            const pointSize = star.size * (i / star.trail.length);
-            ctx.fillRect(point.x - pointSize/2, point.y - pointSize/2, pointSize, pointSize);
-        }
-        
-        // Draw star head
-        ctx.fillStyle = `rgba(255, 255, 255, ${star.life})`;
-        ctx.fillRect(star.x - star.size/2, star.y - star.size/2, star.size, star.size);
-    }
-}
-
-// Draw UFOs for night mode
-function drawUFOs() {
-    for (const ufo of ufos) {
-        // Calculate hover effect
-        const hoverY = ufo.y + Math.sin(ufo.hoverOffset) * 3;
-        
-        // Draw UFO body (saucer shape)
-        ctx.fillStyle = '#CCCCCC'; // Light gray
-        
-        // Draw top dome
-        ctx.beginPath();
-        ctx.ellipse(ufo.x, hoverY - 3, ufo.width/3, ufo.height/2, 0, Math.PI, 0);
-        ctx.fill();
-        
-        // Draw bottom saucer
-        ctx.fillStyle = '#888888'; // Darker gray
-        ctx.beginPath();
-        ctx.ellipse(ufo.x, hoverY, ufo.width/2, ufo.height/2, 0, 0, Math.PI);
-        ctx.fill();
-        
-        // Draw lights (blinking)
-        const lightColors = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00'];
-        const numLights = 4;
-        const lightRadius = 2;
-        
-        for (let i = 0; i < numLights; i++) {
-            // Blink randomly
-            if (Math.random() > 0.2) {
-                const angle = (i / numLights) * Math.PI;
-                const lightX = ufo.x + Math.cos(angle) * (ufo.width/2 - lightRadius);
-                const lightY = hoverY + Math.sin(angle) * (ufo.height/2 - lightRadius);
-                
-                ctx.fillStyle = lightColors[i % lightColors.length];
-                ctx.fillRect(lightX - lightRadius/2, lightY - lightRadius/2, lightRadius, lightRadius);
+            stars.forEach(function (s) { s.on = false; });
+            ufo.on = false;
+            for (let i = 0; i < BIRDS; i++) {
+                const b = birds[i];
+                if (b.on) {
+                    b.x += b.vx * dt; b.t += dt;
+                    if (b.x < -30 || b.x > width + 30) b.on = false;
+                } else if (Math.random() < dt / 3) {
+                    const left = Math.random() < 0.5;
+                    b.on = true; b.x = left ? -20 : width + 20; b.vx = (left ? 1 : -1) * (30 + Math.random() * 60);
+                    b.y = 50 + Math.random() * Math.max(40, horizon - 200); b.size = 8 + Math.random() * 4; b.t = 0;
+                }
             }
         }
     }
-}
 
-// Add background effects to the game loop
-function addBackgroundEffectsToGameLoop() {
-    // Store original render function
-    const originalRender = window.render;
-    
-    // Store original drawBackground function if it exists
-    const originalDrawBackground = window.drawBackground;
-    
-    // Create a modified drawBackground function that includes our effects
-    window.drawBackground = function() {
-        // Call the original drawBackground if it exists
-        if (originalDrawBackground) {
-            originalDrawBackground.apply(this, arguments);
-        } else {
-            // Fallback if the original doesn't exist
-            ctx.fillStyle = isDarkMode ? '#0A2240' : '#4EC0CA';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+    function draw(ctx, night) {
+        if (night) {
+            for (let i = 0; i < STARS; i++) {
+                const s = stars[i];
+                if (!s.on) continue;
+                for (let k = 0; k < TRAIL; k++) {
+                    const f = k / TRAIL;
+                    ctx.globalAlpha = f * s.life;
+                    const sz = s.size * f;
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.fillRect(s.tx[k] - sz / 2, s.ty[k] - sz / 2, sz, sz);
+                }
+                ctx.globalAlpha = s.life;
+                ctx.fillRect(s.x - s.size / 2, s.y - s.size / 2, s.size, s.size);
+            }
+            ctx.globalAlpha = 1;
+            if (ufo.on) {
+                const y = Math.round(ufo.y + Math.sin(ufo.t * 3) * 3), x = Math.round(ufo.x);
+                ctx.fillStyle = '#CFD8E3'; ctx.fillRect(x - 5, y - 6, 10, 4);
+                ctx.fillStyle = '#8C97A6'; ctx.fillRect(x - 10, y - 2, 20, 4);
+                ctx.fillStyle = '#5A6473'; ctx.fillRect(x - 6, y + 2, 12, 2);
+                ctx.fillStyle = (Math.floor(ufo.t * 6) & 1) ? '#5CE1F2' : '#FFFFFF';
+                ctx.fillRect(x - 8, y - 1, 2, 2); ctx.fillRect(x - 1, y - 1, 2, 2); ctx.fillRect(x + 6, y - 1, 2, 2);
+            }
+            return;
         }
-        
-        // Draw our background effects
-        drawBackgroundEffects();
-    };
-    
-    // Don't completely override the render function, just call the original
-    // This preserves all the original game functionality
-    window.render = function() {
-        originalRender.apply(this, arguments);
-    };
-    
-    // Store original update function
-    const originalUpdate = window.update;
-    
-    // Override update function to include background effects
-    window.update = function() {
-        // Call original update first
-        originalUpdate.apply(this, arguments);
-        
-        // Update background effects
-        updateBackgroundEffects();
-    };
-    
-    // Initialize background effects
-    initBackgroundEffects();
-}
+        ctx.fillStyle = 'rgba(8,20,40,0.85)';
+        for (let i = 0; i < BIRDS; i++) {
+            const b = birds[i];
+            if (!b.on) continue;
+            const dir = b.vx < 0 ? -1 : 1, s = b.size, x = Math.round(b.x), y = Math.round(b.y);
+            ctx.fillRect(x - s / 2, y - s / 4, s, s / 2);                                  // body
+            ctx.fillRect(dir > 0 ? x + s / 2 : x - s, y - s / 2, s / 2, s / 2);            // head
+            ctx.fillRect(x - s / 4, (Math.floor(b.t * 6) & 1) ? y + s / 4 : y - s / 2, s / 2, s / 4); // wing flap
+        }
+    }
 
-// Initialize when DOM is loaded
-document.addEventListener('DOMContentLoaded', function() {
-    // Wait a bit to make sure game.js has initialized
-    setTimeout(addBackgroundEffectsToGameLoop, 500);
-});
+    return { update: update, draw: draw, resize: resize };
+})();

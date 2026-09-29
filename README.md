@@ -1,92 +1,76 @@
 # Flattenhund
 
-Retro browser game inspired by Flappy Bird, rebuilt with a dog-powered pixel-art vibe, a zero-dependency local setup, and a SQLite-backed online leaderboard.
+A retro pixel-art flappy game with a matrix-blue glass interface, synthesized chiptune sound and a leaderboard that keeps working when the server does not. Built by Michael Preciado / Preciado Tech.
 
-## Overview
-
-Flattenhund is a lightweight JavaScript canvas game designed to be easy to run, easy to share, and fun to play. It includes character selection, keyboard and touch controls, retro audio, dark mode with a parallax night scene, service-worker support, and a leaderboard served by a small built-in Node/SQLite server.
+![Flattenhund menu at night](assets/images/og-image.png)
 
 ## Features
 
-- Retro pixel-art browser gameplay with parallax day/night scenery
-- Keyboard and touch controls
-- Character selection
-- Local high-score flow with persistent nicknames
-- SQLite-backed online leaderboard (zero external services)
-- PWA/service worker support
-- Static-hosting friendly (game runs anywhere; leaderboard needs the Node server)
-- No frontend framework, no npm dependencies
+- Pixel-art world (parallax hills or a lit skyline, drifting clouds, birds by day, shooting stars and a UFO by night) under a glass UI: near-black `#04060a`, one cyan `#5ce1f2`
+- Fixed 120 Hz physics with render interpolation, so 60, 120 and 144 Hz displays play the same
+- Game feel: perfect-pass combo chips, milestone bursts, screen shake and flash, a tumbling death, particle trail and glow
+- WebAudio sound effects (no audio files), mute button or `M`, remembered between visits
+- Touch first: one tap flaps, 44 px targets, safe-area aware, pauses when the tab loses focus
+- Accessible: keyboard playable, focus rings, labelled controls, `prefers-reduced-motion`, forced-colors
+- Installable PWA with an offline shell and versioned caches
+- Leaderboard: shared SQLite board when the server is up, a local board on the device when it is not (scores sync later)
+- Zero npm dependencies
 
-## Tech Stack
-
-- HTML5 Canvas
-- Vanilla JavaScript
-- CSS
-- Node.js built-in `node:sqlite` for leaderboard storage
-- Vercel/Netlify-compatible static deployment
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 22.5+ (for the built-in `node:sqlite` module)
-
-### Run locally
+## Run it
 
 ```bash
-npm start
+npm start          # http://localhost:8000
 ```
 
-Then open:
+Any Node 18+ works. On Node 22.5+ the leaderboard uses the built-in SQLite; on older Node it falls back to a JSON file store automatically. Set `PORT`, `HOST` or `DATA_DIR` to change where it listens or stores data. To only serve the game files: `npm run start:static`.
+
+Check the code: `npm run check` (syntax check of the server and every script).
+
+### Controls
+
+| Action | Keyboard | Touch / mouse |
+| --- | --- | --- |
+| Flap / start | Space, Up, W | Tap or click the field |
+| Pause / resume | P or Esc | Tap the pause card |
+| Mute | M | Speaker button |
+| Day / night | Moon button | Moon button |
+
+## How it plays
+
+Pipes come every 2 s at a fixed speed and the gap tightens from generous to 170 px over the first 10 points. The hitbox is 5 px smaller than the sprite on each side, and successive gaps are never more than 260 px apart, so every pipe is reachable. Passing within 30 px of a gap centre is a "perfect": it builds a combo with extra juice and higher pitched chimes, but never changes the score.
+
+## Project structure
 
 ```text
-http://localhost:8000
-```
-
-This serves the game **and** the leaderboard API from one process. The SQLite
-database is created automatically at `data/flattenhund.db` on first run. See
-[LOCAL_DATABASE.md](LOCAL_DATABASE.md) for the API and schema details.
-
-## Scripts
-
-| Command | Purpose |
-| --- | --- |
-| `npm start` / `npm run dev` | Run the game + SQLite leaderboard server on port 8000 |
-| `npm run start:static` | Serve the game only (python static server; leaderboard offline) |
-
-## Project Structure
-
-```text
-Flattenhund/
-├── assets/            # Fonts and game assets
-├── css/               # Stylesheets
-├── js/                # Game logic, leaderboard, audio, effects
-├── server/            # Node/SQLite leaderboard server + schema
-├── temp/              # Source art/assets used during development
-├── index.html         # App entry point
-├── style.css          # Main styling
-├── manifest.json      # PWA manifest
-├── sw.js              # Service worker
-├── vercel.json        # Vercel static deployment config
-└── netlify.toml       # Netlify deployment config
+index.html               entry point, meta / Open Graph tags, markup
+style.css                base pixel styling
+css/preciado-glass.css   glass design system, HUD, overlays, a11y (loaded last)
+css/dark-mode.css        night-mode variables
+js/game.js               fixed-step loop, physics, input, game flow
+js/drawing-functions.js  cached parallax scenery, ground, pipes
+js/background-effects.js pooled birds, shooting stars, UFO
+js/audio.js              WebAudio engine and mute
+js/fx.js                 glyph rain, flash, shake
+js/mobile-optimization.js viewport, haptics, wake lock, toast
+js/local-db.js           leaderboard client with local fallback
+js/leaderboard.js        board UI, nickname flow, name filter
+server/                  Node server, storage layer, SQL schema
+sw.js, manifest.json     PWA
 ```
 
 ## Leaderboard
 
-The leaderboard is stored in a local SQLite database and served by
-`server/server.js`. There is nothing to configure: no accounts, no API keys,
-no environment variables. Delete the `data/` directory to reset it.
-
-When the game is served without the API (e.g. a static host), leaderboard
-features disable themselves gracefully and gameplay is unaffected.
+See [LOCAL_DATABASE.md](LOCAL_DATABASE.md) for the API and storage details. On a static host (Vercel, Netlify, GitHub Pages) the API is absent, the client notices within 2.5 s and the game uses the local board. Scores earned meanwhile are queued and posted the next time the API answers.
 
 ## Deployment
 
-The game itself is fully static and deploys as-is to Vercel (see
-`vercel.json`) or Netlify. On static hosts the leaderboard runs in offline
-mode; to have a live leaderboard, run `npm start` on any host that can run a
-Node process.
+The game is static and deploys as-is (`vercel.json`, `netlify.toml`). For a shared leaderboard run `npm start` on any host that can run Node.
+
+Release checklist:
+
+1. Bump `CACHE_VERSION` in `sw.js` when the precache list or any art/font changes (code is network-first, so JS/CSS/HTML updates never need a bump).
+2. Make `og:image` and `twitter:image` in `index.html` absolute URLs on your domain; most crawlers ignore relative ones.
 
 ## License
 
-MIT License
+MIT

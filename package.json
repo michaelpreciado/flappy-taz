@@ -1,15 +1,25 @@
 {
   "name": "flappy-dog",
   "version": "1.0.0",
-  "description": "A Flappy Bird-style game with retro pixel art",
+  "description": "Flattenhund - retro pixel-art flappy game with a matrix-blue glass UI and a SQLite leaderboard",
   "scripts": {
     "start": "node server/server.js",
     "dev": "node server/server.js",
-    "start:static": "python3 -m http.server 8000"
+    "start:static": "python3 -m http.server 8000",
+    "check": "node --check server/server.js && node --check server/store.js && for f in js/*.js sw.js; do node --check $f || exit 1; done"
   },
-  "keywords": ["game", "javascript", "canvas", "flappy-bird", "pixel-art"],
+  "keywords": [
+    "game",
+    "javascript",
+    "canvas",
+    "flappy-bird",
+    "pixel-art",
+    "pwa"
+  ],
   "author": "Michael Preciado",
   "license": "MIT",
-  "devDependencies": {},
-  "dependencies": {}
-} 
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}
